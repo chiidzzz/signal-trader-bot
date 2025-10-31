@@ -1,0 +1,24 @@
+# Python virtual environment
+.venv/
+venv/
+
+# Cache / build
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.log
+
+# Environment / sessions / runtime
+.env
+*.session*
+runtime/
+events.jsonl
+state.json
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

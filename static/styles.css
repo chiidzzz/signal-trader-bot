@@ -1,0 +1,129 @@
+:root {
+  --bg: #0b0f14;
+  --panel: #121820;
+  --text: #e8f0f8;
+  --muted: #8aa0b2;
+  --accent: #3da5ff;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #1e2a36;
+  background: #0d141c;
+  position: sticky;
+  top: 0;
+}
+h1,
+h2 {
+  margin: 0 0 10px;
+}
+main.grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 16px;
+  padding: 16px;
+}
+section {
+  background: var(--panel);
+  border: 1px solid #1e2a36;
+  border-radius: 10px;
+  padding: 12px;
+  min-height: 200px;
+}
+.events {
+  height: 65vh;
+  overflow: auto;
+  background: #0d131a;
+  border-radius: 8px;
+  padding: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.event {
+  padding: 6px 8px;
+  border-bottom: 1px dashed #1e2a36;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pre {
+  background: #0d131a;
+  padding: 10px;
+  border-radius: 8px;
+  min-height: 120px;
+  overflow: auto;
+}
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 6px 0;
+}
+label {
+  color: #cfe3f5;
+}
+input[type="text"],
+input[type="number"] {
+  width: 140px;
+  background: #0b0f14;
+  border: 1px solid #1e2a36;
+  border-radius: 6px;
+  padding: 6px;
+  color: var(--text);
+}
+input[type="checkbox"] {
+  transform: scale(1.1);
+}
+fieldset {
+  border: 1px solid #1e2a36;
+  border-radius: 8px;
+  margin: 10px 0;
+  padding: 8px;
+}
+legend {
+  color: #bcd3e6;
+  padding: 0 6px;
+}
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+button {
+  background: var(--accent);
+  color: #00213a;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover {
+  filter: brightness(1.05);
+}
+.dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.dot.gray {
+  background: #637487;
+}
+.dot.green {
+  background: #35d48d;
+}
+.muted {
+  color: var(--muted);
+}

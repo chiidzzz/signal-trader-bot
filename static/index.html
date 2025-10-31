@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>Signals Bot Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body>
+    <header>
+        <h1>📈 Signals Bot Dashboard</h1>
+        <span id="status-dot" class="dot gray" title="disconnected"></span>
+    </header>
+
+    <main class="grid">
+        <section>
+            <h2>Live Events</h2>
+            <div id="events" class="events"></div>
+        </section>
+
+        <section>
+            <h2>Current State</h2>
+            <pre id="stateBox" class="pre"></pre>
+            <button id="refreshState">Refresh</button>
+        </section>
+
+        <section>
+            <h2>Settings</h2>
+            <form id="cfgForm">
+                <div class="row">
+                    <label>Dry Run</label>
+                    <input type="checkbox" name="dry_run" />
+                </div>
+                <div class="row">
+                    <label>Quote Asset</label>
+                    <input type="text" name="quote_asset" placeholder="USDT" />
+                </div>
+                <div class="row">
+                    <label>Capital Entry % (default)</label>
+                    <input type="number" step="0.01" min="0" max="1" name="capital_entry_pct_default" />
+                </div>
+                <div class="row">
+                    <label>Max Slippage %</label>
+                    <input type="number" step="0.0001" min="0" max="1" name="max_slippage_pct" />
+                </div>
+                <div class="row">
+                    <label>Use Limit if Slippage Exceeds</label>
+                    <input type="checkbox" name="use_limit_if_slippage_exceeds" />
+                </div>
+
+                <fieldset>
+                    <legend>TP Splits</legend>
+                    <div class="row"><label>TP1</label><input type="number" step="0.01" min="0" max="1"
+                            name="tp_splits.tp1" /></div>
+                    <div class="row"><label>TP2</label><input type="number" step="0.01" min="0" max="1"
+                            name="tp_splits.tp2" /></div>
+                    <div class="row"><label>Runner</label><input type="number" step="0.01" min="0" max="1"
+                            name="tp_splits.runner" /></div>
+                </fieldset>
+
+                <fieldset>
+                    <legend>Stop / Trailing</legend>
+                    <div class="row"><label>Move SL to BE after TP2</label><input type="checkbox"
+                            name="stop_loss_move_to_be_after_tp2" /></div>
+                    <div class="row"><label>Trailing Enabled</label><input type="checkbox"
+                            name="trailing_runner_enabled" /></div>
+                    <div class="row"><label>Trailing %</label><input type="number" step="0.0001" min="0" max="1"
+                            name="trailing_pct" /></div>
+                    <div class="row"><label>Trailing Poll (sec)</label><input type="number" step="1" min="1"
+                            name="trailing_poll_sec" /></div>
+                </fieldset>
+
+                <fieldset>
+                    <legend>Guards</legend>
+                    <div class="row"><label>Spot Only</label><input type="checkbox" name="respect_spot_only" /></div>
+                    <div class="row"><label>Min Notional (USDT)</label><input type="number" step="0.01" min="0"
+                            name="min_notional_usdt" /></div>
+                    <div class="row"><label>Limit TIF (sec)</label><input type="number" step="1" min="10"
+                            name="limit_time_in_force_sec" /></div>
+                </fieldset>
+
+                <fieldset>
+                    <legend>Symbol Resolution</legend>
+                    <div class="row"><label>Prefer (TICKER) in name</label><input type="checkbox"
+                            name="prefer_symbol_in_parentheses" /></div>
+                    <div class="row"><label>Fallback fuzzy name search</label><input type="checkbox"
+                            name="fallback_to_name_search" /></div>
+                </fieldset>
+
+                <div class="actions">
+                    <button type="submit">Save Config</button>
+                    <span id="saveInfo" class="muted"></span>
+                </div>
+            </form>
+        </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
