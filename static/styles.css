@@ -127,3 +127,26 @@ button:hover {
 .muted {
   color: var(--muted);
 }
+
+.help {
+  cursor: help;
+  color: #3da5ff;
+  font-weight: bold;
+  margin-left: 4px;
+  position: relative;
+}
+
+.help:hover::after {
+  content: attr(title);
+  position: absolute;
+  background: #0d141c;
+  color: #d9e8f6;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #1e2a36;
+  max-width: 280px;
+  line-height: 1.4;
+  z-index: 100;
+  font-size: 13px;
+  white-space: pre-wrap;
+}

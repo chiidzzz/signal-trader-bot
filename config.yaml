@@ -1,27 +1,15 @@
-# General
-dry_run: true # true = simulate only (no orders), still notifies
-quote_asset: USDT # we map USD→USDT by default
-capital_entry_pct_default: 0.80 # used if signal omits capital %
-max_slippage_pct: 0.015 # 1.5% acceptable deviation vs entry for market buy
+dry_run: false
+quote_asset: USDC
+capital_entry_pct_default: 0.5
+max_slippage_pct: 0.015
 use_limit_if_slippage_exceeds: true
-
-# Position split and exits
-tp_splits: # fractions must sum to <= 1.0
-  tp1: 0.50 # 50%
-  tp2: 0.30 # 30%
-  runner: 0.20 # 20%
-
-# Stop/BE/Trailing rules
-stop_loss_move_to_be_after_tp2: true
-trailing_runner_enabled: true
-trailing_pct: 0.08 # 8% default (7-10% recommended in signals)
-trailing_poll_sec: 5
-
-# Entry behavior
-respect_spot_only: true # ignore if signal says "spot only" but pair is only on futures
-min_notional_usdt: 5 # Binance min notional guard
-limit_time_in_force_sec: 180 # cancel stale limit entries if not filled
-
-# Symbol resolution
-prefer_symbol_in_parentheses: true # e.g., "Maple Finance (SYRUP)"
-fallback_to_name_search: false # conservative default; you can set true to try fuzzy matches
+respect_spot_only: true
+min_notional_usdt: 5
+limit_time_in_force_sec: 60
+prefer_symbol_in_parentheses: true
+fallback_to_name_search: true
+override_tp_enabled: true
+override_tp_pct: 0.02
+override_sl_enabled: false
+override_sl_pct: 0.01
+override_sl_as_absolute: false

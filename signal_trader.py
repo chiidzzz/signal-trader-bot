@@ -72,6 +72,7 @@ class ParsedSignal:
 
 class Settings(BaseModel):
     dry_run: bool = False
+    use_testnet: bool = False
     quote_asset: str = "USDT"
     capital_entry_pct_default: float = 0.80
     max_slippage_pct: float = 0.015
@@ -86,6 +87,11 @@ class Settings(BaseModel):
     limit_time_in_force_sec: int = 180
     prefer_symbol_in_parentheses: bool = True
     fallback_to_name_search: bool = True  # now defaults True
+    override_tp_enabled: bool = False
+    override_tp_pct: float = 0.03
+    override_sl_enabled: bool = False
+    override_sl_pct: float = 0.01
+    override_sl_as_absolute: bool = False
 
 
 def read_settings() -> Settings:
@@ -111,7 +117,7 @@ def maybe_reload_settings():
 
 # --- Binance wrapper ---
 class BinanceSpot:
-    def __init__(self, key, secret, dry):
+    def __init__(self, key, secret, dry, use_testnet=False):
         self.dry = dry
         self.exchange = ccxt.binance({
             "apiKey": key,
@@ -119,6 +125,9 @@ class BinanceSpot:
             "enableRateLimit": True,
             "options": {"defaultType": "spot"},
         })
+        self.exchange.load_time_difference()  # auto-sync with Binance server
+        if use_testnet:
+            self.exchange.set_sandbox_mode(True)
         self.exchange.load_markets()
 
     def find_market(self, base, quote):
@@ -126,10 +135,19 @@ class BinanceSpot:
         pair = f"{base}/{quote}"
         if pair in self.exchange.markets:
             return pair
+        
+        # Map USD to USDT
         if quote == "USD":
             alt = f"{base}/USDT"
             if alt in self.exchange.markets:
                 return alt
+        
+        # Map USDT to USDC if user prefers USDC
+        if quote == "USDT" and hasattr(self, 'prefer_usdc') and self.prefer_usdc:
+            alt = f"{base}/USDC"
+            if alt in self.exchange.markets:
+                return alt
+        
         return None
 
     def fetch_price(self, symbol):
@@ -196,15 +214,16 @@ from parsers.signal_parser import parse_signal, ParsedSignal, TPSet
 
 
 class Trader:
-    def __init__(self, binance: BinanceSpot, tg_client: TelegramClient, notifier: Notifier):
+    def __init__(self, binance: "BinanceSpot", tg_client, notifier):
         self.x = binance
         self.tg = tg_client
         self.n = notifier
 
-    async def on_signal(self, sig: ParsedSignal):
+    async def on_signal(self, sig: "ParsedSignal"):
         maybe_reload_settings()
         s = SETTINGS
 
+        # === Signal debug ===
         emit("signal_parsed", {
             "currency": sig.currency_display,
             "entry": sig.entry,
@@ -223,19 +242,19 @@ class Trader:
             f"TP1–TP3: `${sig.tps.tp1}`, `${sig.tps.tp2}`, `${sig.tps.tp3}`"
         )
 
-        # --- Pair Resolution ---
+        # === Pair Resolution ===
         base = sig.symbol_hint or sig.currency_display.split("/")[0].strip()
         base_clean = re.sub(r"[^A-Za-z0-9 ]", "", base).strip().upper()
         quote = SETTINGS.quote_asset.upper()
         symbol = None
 
-        # 🔹 Step 1: Check if it already includes slash
+        # 1️⃣ Direct slash
         if "/" in sig.currency_display:
             direct = sig.currency_display.replace(" ", "").upper()
             if direct in self.x.exchange.markets:
                 symbol = direct
 
-        # 🔹 Step 2: Check parentheses pattern
+        # 2️⃣ Parentheses pattern
         if not symbol:
             paren_match = re.search(r"\(([A-Z0-9]+/[A-Z0-9]+)\)", sig.currency_display)
             if paren_match:
@@ -243,7 +262,7 @@ class Trader:
                 if candidate in self.x.exchange.markets:
                     symbol = candidate
 
-        # 🔹 Step 3: Use alias dictionary (English names → symbols)
+        # 3️⃣ Alias dictionary
         if not symbol:
             alias_symbol = TOKEN_ALIASES.get(base_clean)
             if alias_symbol:
@@ -251,7 +270,7 @@ class Trader:
                 if found:
                     symbol = found
 
-        # 🔹 Step 4: fallback direct base/quote
+        # 4️⃣ Fallback to base/quote
         if not symbol:
             symbol = self.x.find_market(base_clean, quote)
 
@@ -262,7 +281,35 @@ class Trader:
 
         await self.n.send(self.tg, f"✅ Pair resolved: *{symbol}*")
 
-        # --- Simulation or trade execution ---
+        # === Duplicate signal protection (30s window) ===
+        if not hasattr(self, "_recent_signals"):
+            self._recent_signals = []  # list of (symbol, entry, ts)
+
+        now = time.time()
+        self._recent_signals = [
+            (sym, ent, ts)
+            for (sym, ent, ts) in self._recent_signals
+            if now - ts < 30
+        ]
+
+        # Normalize symbol name
+        symbol_clean = symbol.replace(" ", "").upper()
+        entry_price = round(float(sig.entry), 6)
+
+        # Check duplicates
+        for sym, ent, ts in self._recent_signals:
+            if sym == symbol_clean and abs(ent - entry_price) < 1e-6:
+                await self.n.send(
+                    self.tg,
+                    f"⚠️ Duplicate signal ignored for {symbol_clean} (entry {sig.entry})"
+                )
+                emit("skip_duplicate", {"symbol": symbol_clean, "entry": sig.entry})
+                return
+
+        # Record this signal
+        self._recent_signals.append((symbol_clean, entry_price, now))
+
+        # === Balance and sizing ===
         free_q = 100.0 if s.dry_run else self.x.fetch_free_quote(symbol.split("/")[1])
         cap_pct = sig.capital_pct or s.capital_entry_pct_default
         spend = free_q * cap_pct
@@ -281,9 +328,128 @@ class Trader:
             await self.n.send(self.tg, "❌ Computed amount is zero")
             return
 
-        emit("entry_filled", {"symbol": symbol, "amount": amount, "price": px_for_size, "mode": "sim"})
-        await self.n.send(self.tg, f"🟢 Simulated buy {symbol} {amount} @ ~{px_for_size:.6f}")
+        # === Execution mode ===
+        is_live = not s.dry_run
+        is_testnet = getattr(s, "use_testnet", False)
+        mode_label = "testnet" if (is_live and is_testnet) else "mainnet" if is_live else "sim"
 
+        try:
+            if is_live:
+                # === LIVE TRADING (real orders) ===
+                from live_trade_executor import execute_market_buy, place_oco
+
+                try:
+                    # --- choose order type dynamically ---
+                    if acceptable or not s.use_limit_if_slippage_exceeds:
+                        # Within allowed deviation → market buy
+                        filled_qty = execute_market_buy(symbol, spend)
+                        await self.n.send(self.tg, f"✅ Live BUY filled {filled_qty} {symbol} ({mode_label})")
+                    else:
+                        # Too far from entry → place limit order at signal entry
+                        usd_price = sig.entry
+                        qty = spend / usd_price
+                        amt_step, _ = self.x.lot_step_info(symbol)
+                        qty = round_amt(qty, amt_step)
+                        limit_order = self.x.create_limit_buy(symbol, qty, usd_price)
+                        await self.n.send(self.tg, f"📉 Limit BUY placed {qty} {symbol} @ {usd_price}")
+
+                        # Wait for fill up to timeout
+                        timeout = s.limit_time_in_force_sec
+                        start = time.time()
+                        filled_qty = 0.0
+                        while time.time() - start < timeout:
+                            order = self.x.exchange.fetch_order(limit_order["id"], symbol)
+                            if order["status"].lower() == "closed":
+                                filled_qty = float(order["filled"])
+                                await self.n.send(self.tg, f"✅ Limit BUY filled {filled_qty} {symbol} ({mode_label})")
+                                break
+                            await asyncio.sleep(5)
+                        else:
+                            self.x.cancel_order(symbol, limit_order["id"])
+                            await self.n.send(self.tg, f"⌛ Limit not filled after {timeout}s — canceled.")
+                            return
+
+                    # --- Determine TP & SL (configurable overrides) ---
+                    entry_price = float(sig.entry)
+
+                    # Defaults from signal
+                    tp = sig.tps.tp1
+                    sl_trigger = sig.stop
+
+                    # Apply TP override if enabled
+                    if getattr(s, "override_tp_enabled", False):
+                        tp = round(entry_price * (1.0 + float(s.override_tp_pct)), 8)
+                        emit("info", {"msg": "Overriding TP from config", "tp": tp})
+
+                    # Apply SL override if enabled
+                    if getattr(s, "override_sl_enabled", False):
+                        if getattr(s, "override_sl_as_absolute", False):
+                            sl_trigger = round(entry_price - float(s.override_sl_pct), 8)
+                        else:
+                            sl_trigger = round(entry_price * (1.0 - float(s.override_sl_pct)), 8)
+                        emit("info", {"msg": "Overriding SL from config", "sl": sl_trigger})
+
+                    # Compute SL limit (0.1% below SL trigger)
+                    sl_limit = sl_trigger - (sl_trigger * 0.001) if sl_trigger else None
+
+                    # --- Telegram notice of overrides ---
+                    override_msgs = []
+                    if getattr(s, "override_tp_enabled", False):
+                        override_msgs.append(f"TP → {tp}")
+                    if getattr(s, "override_sl_enabled", False):
+                        override_msgs.append(f"SL → {sl_trigger}")
+                    if override_msgs:
+                        await self.n.send(self.tg, "⚙️ Config override active: " + ", ".join(override_msgs))
+
+                    # --- Safety check: ensure logical price order ---
+                    if sl_trigger and not (tp > sig.entry > sl_trigger):
+                        raise ValueError(
+                            f"Invalid price relation: TP({tp}) > Entry({sig.entry}) > SL({sl_trigger}) required."
+                        )
+
+                    # --- Place OCO (TP + SL) ---
+                    if sl_trigger and sl_limit:
+                        oco = place_oco(
+                            symbol,
+                            "SELL",
+                            f"{filled_qty:.8f}",
+                            str(tp),
+                            str(sl_trigger),
+                            str(sl_limit)
+                        )
+                        await self.n.send(
+                            self.tg,
+                            f"🎯 OCO set → TP {tp}, SL {sl_trigger}/{sl_limit}\nOCO ID: {oco.get('orderListId', 'N/A')}"
+                        )
+                        emit("oco_placed", {
+                            "symbol": symbol,
+                            "tp": tp,
+                            "sl": sl_trigger,
+                            "oco_id": oco.get('orderListId')
+                        })
+                    else:
+                        await self.n.send(self.tg, "⚠️ No SL provided — TP only.")
+
+                except Exception as e:
+                    await self.n.send(self.tg, f"❌ Live execution failed: {e}")
+                    emit("error", {"msg": f"Live OCO exec failed: {e}"})
+
+            else:
+                # === SIMULATION MODE ===
+                emit("entry_filled", {
+                    "symbol": symbol,
+                    "amount": amount,
+                    "price": px_for_size,
+                    "mode": mode_label
+                })
+                await self.n.send(
+                    self.tg,
+                    f"🟢 Simulated buy {symbol} {amount} @ ~{px_for_size:.6f}"
+                )
+
+        except Exception as e:
+            emit("error", {"msg": f"Order placement failed: {e}"})
+            await self.n.send(self.tg, f"❌ Order placement failed: {e}")
 
 # --- Main loop ---
 async def main():
@@ -301,7 +467,15 @@ async def main():
     print("✅ Telegram client started successfully.")
 
     notifier = Notifier(notify_chat)
-    binance = BinanceSpot(os.environ["BINANCE_API_KEY"], os.environ["BINANCE_API_SECRET"], read_settings().dry_run)
+    cfg = read_settings()
+    binance = BinanceSpot(
+    os.environ["BINANCE_API_KEY"],
+    os.environ["BINANCE_API_SECRET"],
+    cfg.dry_run,
+    cfg.use_testnet
+    )
+
+    binance.prefer_usdc = (cfg.quote_asset.upper() == "USDC")
     trader = Trader(binance, client, notifier)
 
     print("✅ Notifier and Trader initialized.")
