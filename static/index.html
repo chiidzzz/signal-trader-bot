@@ -24,7 +24,6 @@
         <section>
             <h2>Settings</h2>
             <form id="cfgForm">
-
                 <div class="row">
                     <label>Dry Run
                         <span class="help"
@@ -139,7 +138,23 @@
                         </label>
                         <input type="checkbox" name="override_sl_as_absolute" />
                     </div>
+                </fieldset>
 
+                <fieldset>
+                    <legend>Safety Watchdogs</legend>
+                    <div class="row">
+                        <label>Flatten Check Interval (minutes)
+                            <span class="help" title="How often the bot checks open orders for missing SL/TP.">❓</span>
+                        </label>
+                        <input type="number" step="1" min="1" name="flatten_check_interval_min" value="10" />
+                    </div>
+                    <div class="row">
+                        <label>Heartbeat Idle Limit (minutes)
+                            <span class="help"
+                                title="How long the bot can go without receiving signals before sending an alert.">❓</span>
+                        </label>
+                        <input type="number" step="1" min="1" name="heartbeat_max_idle_min" value="30" />
+                    </div>
                 </fieldset>
 
                 <div class="actions">

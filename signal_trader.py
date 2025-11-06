@@ -7,6 +7,13 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 import ccxt
+import csv, datetime, traceback, aiofiles
+from live_trade_executor import place_bracket_atomic, place_oco, _fmt, _get_tick_and_step
+from binance.client import Client
+import time
+import math
+
+last_signal_ts = time.time()
 
 # --- Local utils ---
 RUNTIME_DIR = "runtime"
@@ -97,7 +104,14 @@ class Settings(BaseModel):
 def read_settings() -> Settings:
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return Settings(**yaml.safe_load(f))
-
+    
+def read_settings_dict() -> dict:
+    """Read config.yaml as raw dict instead of Pydantic model."""
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
 
 SETTINGS = read_settings()
 _last_cfg_mtime = os.path.getmtime(CONFIG_FILE)
@@ -114,6 +128,27 @@ def maybe_reload_settings():
     except Exception as e:
         emit("warning", {"msg": f"Failed to reload config: {e}"})
 
+# --- Error logger -------------------------------------------------------------
+async def log_error(msg: str):
+    ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    os.makedirs("runtime", exist_ok=True)
+    async with aiofiles.open("runtime/errors.log", "a", encoding="utf-8") as f:
+        await f.write(f"[{ts}] {msg}\n")
+
+# --- PnL / exposure logger ----------------------------------------------------
+def log_trade_pnl(symbol, side, entry, exit, qty, pnl_usd, status):
+    """Append trade PnL/exposure to CSV."""
+    os.makedirs("runtime", exist_ok=True)
+    path = "runtime/pnl_log.csv"
+    exists = os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if not exists:
+            w.writerow(["timestamp","symbol","side","entry","exit","qty","pnl_usd","status"])
+        w.writerow([
+            datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            symbol, side, entry, exit, qty, round(pnl_usd,4), status
+        ])
 
 # --- Binance wrapper ---
 class BinanceSpot:
@@ -125,7 +160,13 @@ class BinanceSpot:
             "enableRateLimit": True,
             "options": {"defaultType": "spot"},
         })
-        self.exchange.load_time_difference()  # auto-sync with Binance server
+        # --- Time drift auto-correction ---
+        try:
+            diff = self.exchange.load_time_difference()
+            print(f"✅ Binance time difference synced ({diff:.0f} ms)")
+        except Exception as e:
+            print(f"⚠️ Could not sync Binance time difference: {e}")
+
         if use_testnet:
             self.exchange.set_sandbox_mode(True)
         self.exchange.load_markets()
@@ -289,7 +330,7 @@ class Trader:
         self._recent_signals = [
             (sym, ent, ts)
             for (sym, ent, ts) in self._recent_signals
-            if now - ts < 30
+            if now - ts < 60
         ]
 
         # Normalize symbol name
@@ -335,104 +376,191 @@ class Trader:
 
         try:
             if is_live:
-                # === LIVE TRADING (real orders) ===
-                from live_trade_executor import execute_market_buy, place_oco
-
+                # === LIVE TRADING (real orders) === 
                 try:
-                    # --- choose order type dynamically ---
-                    if acceptable or not s.use_limit_if_slippage_exceeds:
-                        # Within allowed deviation → market buy
-                        filled_qty = execute_market_buy(symbol, spend)
-                        await self.n.send(self.tg, f"✅ Live BUY filled {filled_qty} {symbol} ({mode_label})")
+                    # Step 1: Determine INITIAL TP & SL from signal
+                    initial_tp = float(sig.tps.tp1)
+                    initial_sl = float(sig.stop)
+                    
+                    # Step 2: Determine if we should skip initial OCO
+                    use_override_direct = getattr(s, "override_tp_enabled", False) or getattr(s, "override_sl_enabled", False)
+
+                    if use_override_direct:
+                        emit("info", {"msg": "Override mode enabled → skipping initial OCO, will use override OCO directly"})
+                        # just do a market buy, no OCO
+                        from live_trade_executor import execute_market_buy
+                        filled_qty, actual_fill_price = execute_market_buy(symbol, spend)
+                        res = {
+                            "filled_qty": filled_qty,
+                            "avg_price": actual_fill_price,
+                            "tp": initial_tp,
+                            "sl_trigger": initial_sl,
+                            "oco_id": None,
+                        }
                     else:
-                        # Too far from entry → place limit order at signal entry
-                        usd_price = sig.entry
-                        qty = spend / usd_price
-                        amt_step, _ = self.x.lot_step_info(symbol)
-                        qty = round_amt(qty, amt_step)
-                        limit_order = self.x.create_limit_buy(symbol, qty, usd_price)
-                        await self.n.send(self.tg, f"📉 Limit BUY placed {qty} {symbol} @ {usd_price}")
+                        # normal full bracket (market + OCO)
+                        res = place_bracket_atomic(
+                            symbol=symbol,
+                            spend_usd=spend,
+                            entry_hint=float(sig.entry),
+                            tp_price=initial_tp,
+                            sl_trigger=initial_sl,
+                        )
 
-                        # Wait for fill up to timeout
-                        timeout = s.limit_time_in_force_sec
-                        start = time.time()
-                        filled_qty = 0.0
-                        while time.time() - start < timeout:
-                            order = self.x.exchange.fetch_order(limit_order["id"], symbol)
-                            if order["status"].lower() == "closed":
-                                filled_qty = float(order["filled"])
-                                await self.n.send(self.tg, f"✅ Limit BUY filled {filled_qty} {symbol} ({mode_label})")
-                                break
-                            await asyncio.sleep(5)
-                        else:
-                            self.x.cancel_order(symbol, limit_order["id"])
-                            await self.n.send(self.tg, f"⌛ Limit not filled after {timeout}s — canceled.")
-                            return
-
-                    # --- Determine TP & SL (configurable overrides) ---
-                    entry_price = float(sig.entry)
-
-                    # Defaults from signal
-                    tp = sig.tps.tp1
-                    sl_trigger = sig.stop
-
-                    # Apply TP override if enabled
+                    # Step 3: Get ACTUAL fill price and quantity
+                    actual_fill_price = float(res['avg_price'])
+                    filled_qty = float(res['filled_qty'])
+                    
+                    # Step 4: Check if we need to override TP/SL based on ACTUAL fill
+                    needs_override = False
+                    final_tp = res['tp']
+                    final_sl = res['sl_trigger']
+                    
+                    # TP override
                     if getattr(s, "override_tp_enabled", False):
-                        tp = round(entry_price * (1.0 + float(s.override_tp_pct)), 8)
-                        emit("info", {"msg": "Overriding TP from config", "tp": tp})
+                        final_tp = round(actual_fill_price * (1.0 + float(s.override_tp_pct)), 8)
+                        needs_override = True
+                        emit("info", {
+                            "msg": "TP overridden",
+                            "fill": actual_fill_price,
+                            "tp": final_tp,
+                            "pct": s.override_tp_pct
+                        })
 
-                    # Apply SL override if enabled
+                    # SL override
                     if getattr(s, "override_sl_enabled", False):
                         if getattr(s, "override_sl_as_absolute", False):
-                            sl_trigger = round(entry_price - float(s.override_sl_pct), 8)
+                            final_sl = round(actual_fill_price - float(s.override_sl_pct), 8)
                         else:
-                            sl_trigger = round(entry_price * (1.0 - float(s.override_sl_pct)), 8)
-                        emit("info", {"msg": "Overriding SL from config", "sl": sl_trigger})
+                            final_sl = round(actual_fill_price * (1.0 - float(s.override_sl_pct)), 8)
+                        needs_override = True
+                        emit("info", {
+                            "msg": "SL overridden",
+                            "fill": actual_fill_price,
+                            "sl": final_sl,
+                            "pct_or_abs": s.override_sl_pct
+                        })
 
-                    # Compute SL limit (0.1% below SL trigger)
-                    sl_limit = sl_trigger - (sl_trigger * 0.001) if sl_trigger else None
-
-                    # --- Telegram notice of overrides ---
-                    override_msgs = []
-                    if getattr(s, "override_tp_enabled", False):
-                        override_msgs.append(f"TP → {tp}")
-                    if getattr(s, "override_sl_enabled", False):
-                        override_msgs.append(f"SL → {sl_trigger}")
-                    if override_msgs:
-                        await self.n.send(self.tg, "⚙️ Config override active: " + ", ".join(override_msgs))
-
-                    # --- Safety check: ensure logical price order ---
-                    if sl_trigger and not (tp > sig.entry > sl_trigger):
-                        raise ValueError(
-                            f"Invalid price relation: TP({tp}) > Entry({sig.entry}) > SL({sl_trigger}) required."
+                    # Step 5: If override needed, cancel old OCO and place new one
+                    if needs_override:
+                        base_asset = symbol.split("/")[0].upper()
+                        bin_client = Client(
+                            os.environ["BINANCE_API_KEY"],
+                            os.environ["BINANCE_API_SECRET"]
                         )
 
-                    # --- Place OCO (TP + SL) ---
-                    if sl_trigger and sl_limit:
-                        oco = place_oco(
-                            symbol,
-                            "SELL",
-                            f"{filled_qty:.8f}",
-                            str(tp),
-                            str(sl_trigger),
-                            str(sl_limit)
-                        )
+                        # --- Step A: cancel the old OCO if it exists ---
+                        cancelled = False
+                        if not res.get("oco_id"):
+                            emit("info", {"msg": "No initial OCO to cancel (override-only mode)."})
+                        else:
+                            for i in range(5):
+                                try:
+                                    self.x.exchange.cancel_order(res["oco_id"], symbol)
+                                    emit("info", {"msg": f"Cancelled original OCO {res['oco_id']} for override"})
+                                    cancelled = True
+                                    break
+                                except Exception as e:
+                                    msg = str(e)
+                                    if "Unknown order" in msg or "not found" in msg:
+                                        # OCO not yet visible — wait and retry
+                                        time.sleep(0.4)
+                                        continue
+                                    else:
+                                        emit("warning", {"msg": f"OCO cancel attempt {i+1} failed: {e}"})
+                                        time.sleep(0.4)
+                                        continue
+                            if not cancelled:
+                                emit("warning", {"msg": "Proceeding with override even though cancel not confirmed"})
+
+                        # --- Step B: wait for balance to unlock ---
+                        time.sleep(1.0)
+
+                        # --- Step C: fetch exact free balance (post-cancel) ---
+                        try:
+                            bal = bin_client.get_asset_balance(asset=base_asset)
+                            free_qty = float(bal["free"])
+                            safe_qty = min(free_qty, filled_qty)
+                            _, step = _get_tick_and_step(symbol.replace("/", ""))
+                            safe_qty = math.floor(safe_qty / step) * step
+                            print(f"[OCO DEBUG] override safe_qty={safe_qty} (free={free_qty}, filled={filled_qty})")
+                        except Exception as e:
+                            print(f"[WARN] Could not fetch free balance for {base_asset}: {e}, fallback to filled_qty")
+                            safe_qty = filled_qty * 0.999
+
+                        # --- Step D: compute final SL limit (0.01% below trigger) ---
+                        final_sl_limit = round(final_sl * 0.9999, 8)
+
+                        # --- Step E: place the new OCO with retry logic ---
+                        for attempt in range(3):
+                            try:
+                                new_oco = place_oco(
+                                    symbol,
+                                    "SELL",
+                                    _fmt(safe_qty),
+                                    str(final_tp),
+                                    str(final_sl),
+                                    str(final_sl_limit)
+                                )
+                                new_oco_id = new_oco.get("orderListId")
+                                print(f"[OCO SUCCESS] override placed qty={safe_qty} TP={final_tp} SL={final_sl}/{final_sl_limit}")
+                                break  # success
+                            except Exception as e:
+                                msg = str(e).lower()
+                                if "insufficient balance" in msg and attempt < 2:
+                                    safe_qty *= 0.999
+                                    safe_qty = math.floor(safe_qty / step) * step
+                                    print(f"[OCO RETRY] Attempt {attempt+1}: insufficient balance, retrying with {safe_qty}")
+                                    time.sleep(0.5)
+                                    continue
+                                raise
+
+                        # --- Step F: confirmation message ---
+                        new_oco_id = new_oco.get("orderListId")
+                        profit_pct = ((final_tp / actual_fill_price) - 1) * 100
+                        loss_pct = ((actual_fill_price / final_sl) - 1) * 100
                         await self.n.send(
                             self.tg,
-                            f"🎯 OCO set → TP {tp}, SL {sl_trigger}/{sl_limit}\nOCO ID: {oco.get('orderListId', 'N/A')}"
+                            (
+                                f"✅ BUY filled {safe_qty:.8f} {symbol} @ ${actual_fill_price:.6f} ({mode_label})\n"
+                                f"⚙️ Override applied:\n"
+                                f"   • TP ${final_tp:.6f} (+{profit_pct:.2f}%)\n"
+                                f"   • SL ${final_sl:.6f} (-{loss_pct:.2f}%)\n"
+                                f"🆔 OCO ID: {new_oco_id}"
+                            ),
+                        )
+                        emit("oco_overridden", {
+                            "symbol": symbol,
+                            "fill_price": actual_fill_price,
+                            "filled_qty": safe_qty,
+                            "tp": final_tp,
+                            "sl_trigger": final_sl,
+                            "oco_id": new_oco_id
+                        })
+                    else:
+                        # No override — original OCO already in place
+                        await self.n.send(
+                            self.tg,
+                            (
+                                f"✅ BUY filled {filled_qty:.8f} {symbol} @ ${actual_fill_price:.6f} ({mode_label})\n"
+                                f"🎯 OCO set → TP ${res['tp']:.6f}, SL ${res['sl_trigger']:.6f}/${res['sl_limit']:.6f}\n"
+                                f"🆔 OCO ID: {res['oco_id']}"
+                            ),
                         )
                         emit("oco_placed", {
                             "symbol": symbol,
-                            "tp": tp,
-                            "sl": sl_trigger,
-                            "oco_id": oco.get('orderListId')
+                            "fill_price": actual_fill_price,
+                            "filled_qty": filled_qty,
+                            "tp": res["tp"],
+                            "sl": res["sl_trigger"],
+                            "oco_id": res["oco_id"]
                         })
-                    else:
-                        await self.n.send(self.tg, "⚠️ No SL provided — TP only.")
 
                 except Exception as e:
-                    await self.n.send(self.tg, f"❌ Live execution failed: {e}")
-                    emit("error", {"msg": f"Live OCO exec failed: {e}"})
+                    await self.n.send(self.tg, f"❌ Trade execution failed: {e}")
+                    emit("error", {"msg": f"Trade execution failed: {e}"})
+                    import traceback
+                    await log_error(f"Trade error: {traceback.format_exc()}")
 
             else:
                 # === SIMULATION MODE ===
@@ -464,15 +592,44 @@ async def main():
     print(f"[Telegram] Using session file: {session_path}.session")
     client = TelegramClient(session_path, api_id, api_hash)
     await client.start()
+
+    # --- Prefetch and normalize entity ---
+    chat_id_str = os.getenv("TG_CHANNEL_ID_OR_USERNAME")
+    channel_to_listen = None  # This will be used in the handler
+    
+    if chat_id_str:
+        try:
+            # Try as integer first
+            try:
+                channel_to_listen = int(chat_id_str)  # Convert to int!
+                resolved_entity = await client.get_entity(channel_to_listen)
+                print(f"✅ Entity resolved as ID: {channel_to_listen} → {getattr(resolved_entity, 'title', resolved_entity)}")
+            except ValueError:
+                # It's a username string
+                channel_to_listen = chat_id_str
+                resolved_entity = await client.get_entity(chat_id_str)
+                print(f"✅ Entity resolved as username: {chat_id_str} → {getattr(resolved_entity, 'title', resolved_entity)}")
+        except Exception as e:
+            print(f"⚠️ Could not prefetch entity ({chat_id_str}): {e}")
+            print(f"   Will try using it directly anyway...")
+            # Fallback: try to use as-is
+            try:
+                channel_to_listen = int(chat_id_str)
+            except ValueError:
+                channel_to_listen = chat_id_str
+    else:
+        print("⚠️ TG_CHANNEL_ID_OR_USERNAME not found in .env")
+        channel_to_listen = channel  # Fallback to original string
+
     print("✅ Telegram client started successfully.")
 
     notifier = Notifier(notify_chat)
     cfg = read_settings()
     binance = BinanceSpot(
-    os.environ["BINANCE_API_KEY"],
-    os.environ["BINANCE_API_SECRET"],
-    cfg.dry_run,
-    cfg.use_testnet
+        os.environ["BINANCE_API_KEY"],
+        os.environ["BINANCE_API_SECRET"],
+        cfg.dry_run,
+        cfg.use_testnet
     )
 
     binance.prefer_usdc = (cfg.quote_asset.upper() == "USDC")
@@ -487,24 +644,107 @@ async def main():
     except Exception as e:
         print(f"❌ Failed to send notifier message: {e}")
 
-    @client.on(events.NewMessage(chats=channel))
+    # --- SAFETY TASKS: STOP-GAP FLATTEN AUDIT ---
+    async def audit_positions_loop():
+        interval = float(read_settings_dict().get("flatten_check_interval_min", 10)) * 60
+        while True:
+            try:
+                open_orders = binance.exchange.fetch_open_orders()
+                # Group by symbol
+                missing = {}
+                for o in open_orders:
+                    if o["type"] not in ("TAKE_PROFIT_LIMIT", "STOP_LOSS_LIMIT"):
+                        continue
+                    missing.setdefault(o["symbol"], set()).add(o["type"])
+                for sym, types in missing.items():
+                    if not {"TAKE_PROFIT_LIMIT", "STOP_LOSS_LIMIT"}.issubset(types):
+                        await notifier.send(
+                            client,
+                            f"⚠️ Audit: {sym} missing "
+                            f"{'TP' if 'TAKE_PROFIT_LIMIT' not in types else 'SL'} order!"
+                        )
+                await asyncio.sleep(interval)
+            except Exception as e:
+                await log_error(f"flatten audit error: {e}")
+                await asyncio.sleep(interval)
+
+    asyncio.create_task(audit_positions_loop())
+
+    # --- SAFETY TASK: HEARTBEAT WATCHDOG ---
+    heartbeat_max = float(read_settings_dict().get("heartbeat_max_idle_min", 30))
+    print(f"⏱️ Heartbeat watchdog started (max idle {heartbeat_max} min)")
+
+    async def heartbeat_watchdog():
+        global last_signal_ts
+        max_idle = heartbeat_max * 60
+        while True:
+            await asyncio.sleep(max_idle / 2)
+            idle = time.time() - last_signal_ts
+            if idle > max_idle:
+                await notifier.send(
+                    client,
+                    f"⚠️ No signals received for {int(idle/60)} minutes!"
+                )
+                await log_error(f"⚠️ Heartbeat: no signals for {int(idle/60)} minutes")
+
+    asyncio.create_task(heartbeat_watchdog())
+
+    # --- EVENT HANDLER ---
+    print(f"👂 Listening to channel: {channel_to_listen!r} (type: {type(channel_to_listen).__name__})")
+    
+    # FIXED: Register debug handler to see ALL messages
+    @client.on(events.NewMessage(chats=channel_to_listen))
+    async def debug_all_messages(event):
+        """Debug: log every single message received"""
+        try:
+            chat = await event.get_chat()
+            chat_name = getattr(chat, 'title', str(chat))
+            print(f"[🔍 RAW] From '{chat_name}' (ID: {chat.id})")
+            print(f"[🔍 TEXT] {event.raw_text[:200]!r}")
+        except Exception as e:
+            print(f"[🔍 ERROR] Debug handler failed: {e}")
+    
+    @client.on(events.NewMessage(chats=channel_to_listen))
     async def handler(event):
         text = event.message.message or ""
-        if not re.search(r'\bSignal\b|إشارة|Spot', text, flags=re.IGNORECASE):
+        global last_signal_ts
+        last_signal_ts = time.time()
+
+        print(f"[✅ HANDLER] Message received, length: {len(text)} chars")
+
+        # FIXED: More permissive regex - match any of these keywords
+        if not re.search(r'signal|إشارة|spot|coin|entry', text, flags=re.IGNORECASE):
+            print(f"[⏭️ SKIP] No keyword found in: {text[:100]!r}")
+            emit("ignored", {"reason": "no_keyword", "preview": text[:100]})
             return
+
+        print(f"[✅ KEYWORD] Found signal keyword!")
         emit("new_message", {"preview": text[:120]})
+
         from parsers.signal_parser import parse_signal
         sig = parse_signal(text)
+        
         if not sig:
-            emit("ignored", {"reason": "parse_failed"})
+            print(f"[❌ PARSE] Failed to parse signal")
+            emit("ignored", {"reason": "parse_failed", "text": text[:200]})
             return
-        emit("parse_success", {"currency": sig.currency_display, "entry": sig.entry, "sl": sig.stop, "tp1": sig.tps.tp1})
+
+        print(f"[✅ PARSED] {sig.currency_display} @ {sig.entry}")
+        emit("parse_success", {
+            "currency": sig.currency_display,
+            "entry": sig.entry,
+            "sl": sig.stop,
+            "tp1": sig.tps.tp1
+        })
+        
         try:
             await trader.on_signal(sig)
         except Exception as e:
+            print(f"[❌ TRADE] Error executing trade: {e}")
             emit("error", {"msg": repr(e)})
             await notifier.send(client, f"❌ Error: {e!r}")
 
+    # Heartbeat task
     async def heart():
         while True:
             await asyncio.sleep(10)
@@ -512,6 +752,8 @@ async def main():
             emit("heartbeat", {"dry_run": SETTINGS.dry_run})
 
     asyncio.create_task(heart())
+    
+    print("🚀 Bot is now running. Waiting for messages...")
     await client.run_until_disconnected()
 
 

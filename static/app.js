@@ -18,14 +18,16 @@ function connectSSE() {
   };
   es.onerror = () => {
     statusDot.className = "dot gray";
-    statusDot.title = "disconnected";
+    statusDot.title = "reconnecting…";
+    // retry after short backoff
+    setTimeout(connectSSE, 2000);
   };
   es.onmessage = (e) => {
     try {
       const obj = JSON.parse(e.data);
       renderEvent(obj);
     } catch {
-      /* ignore malformed lines */
+      // ignore non-JSON lines (e.g., comments/keepalive)
     }
   };
 }
@@ -47,12 +49,15 @@ async function loadConfig() {
     const res = await fetch("/api/config");
     const cfg = await res.json();
 
-    const set = (name, val) => {
+    function set(name, val) {
       const el = cfgForm.querySelector(`[name="${name}"]`);
       if (!el) return;
-      if (el.type === "checkbox") el.checked = !!val;
-      else el.value = val ?? "";
-    };
+      if (el.type === "checkbox") {
+        if (typeof val === "boolean") el.checked = val; // only set when boolean provided
+      } else {
+        if (val !== undefined && val !== null) el.value = val;
+      }
+    }
 
     // Core options
     set("dry_run", cfg.dry_run);
@@ -76,6 +81,10 @@ async function loadConfig() {
     set("override_sl_enabled", cfg.override_sl_enabled);
     set("override_sl_pct", cfg.override_sl_pct);
     set("override_sl_as_absolute", cfg.override_sl_as_absolute);
+
+    // Safety Watchdogs - FIXED: now properly loading these values
+    set("flatten_check_interval_min", cfg.flatten_check_interval_min);
+    set("heartbeat_max_idle_min", cfg.heartbeat_max_idle_min);
   } catch (err) {
     console.error("Failed to load config:", err);
   }
@@ -116,15 +125,23 @@ cfgForm.onsubmit = async (e) => {
     "override_sl_enabled",
     "override_sl_pct",
     "override_sl_as_absolute",
+    "flatten_check_interval_min",
+    "heartbeat_max_idle_min",
   ];
 
   for (const name of fields) {
     const el = get(name);
     if (!el) continue;
     let val;
-    if (el.type === "checkbox") val = el.checked;
-    else if (el.type === "number") val = Number(el.value);
-    else val = el.value;
+    if (el.type === "checkbox") {
+      val = el.checked;
+    } else if (el.type === "number") {
+      // FIXED: Properly handle number inputs, including when they're empty
+      const num = Number(el.value);
+      val = isNaN(num) ? null : num;
+    } else {
+      val = el.value;
+    }
     setNested(name, val);
   }
 
