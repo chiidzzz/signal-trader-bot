@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 import ccxt
 import csv, datetime, traceback, aiofiles
-from live_trade_executor import place_bracket_atomic, place_oco, _fmt, _get_tick_and_step
+from live_trade_executor import place_bracket_atomic, place_oco, _fmt, _get_tick_and_step, _get_symbol_info, _get_tick_and_step
 from binance.client import Client
 import time
 import math
@@ -23,7 +23,7 @@ CONFIG_FILE = "config.yaml"
 ALIASES_FILE = "token_aliases.json"
 os.makedirs(RUNTIME_DIR, exist_ok=True)
 
-
+         
 def emit(event_type: str, payload: dict):
     """Append a compact JSON line for dashboard."""
     line = {"ts": int(time.time()), "type": event_type, **payload}
@@ -56,6 +56,37 @@ def load_aliases() -> dict:
 
 
 TOKEN_ALIASES = load_aliases()
+
+# --- OCO Tracker Helpers ------------------------------------------------------
+OCO_TRACKER = os.path.join(RUNTIME_DIR, "oco_tracker.json")
+
+def _read_oco_tracker() -> dict:
+    try:
+        with open(OCO_TRACKER, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _write_oco_tracker(d: dict):
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    with open(OCO_TRACKER, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+
+def track_oco(symbol: str, oco_id: int):
+    d = _read_oco_tracker()
+    d[str(oco_id)] = {"symbol": symbol, "ts": int(time.time())}
+    _write_oco_tracker(d)
+
+def untrack_oco(oco_id: int):
+    d = _read_oco_tracker()
+    if str(oco_id) in d:
+        d.pop(str(oco_id), None)
+        _write_oco_tracker(d)
+
+def list_tracked_oco():
+    d = _read_oco_tracker()
+    return {int(k): v for k, v in d.items()}
+
 
 # --- Models ---
 class TPSet(BaseModel):
@@ -242,12 +273,58 @@ def round_amt(q, step):
 class Notifier:
     def __init__(self, chat_id: str):
         self.chat_id = chat_id
+        self._entity_cache = None  # Cache the resolved entity
+        print(f"[NOTIFIER INIT] Configured chat_id: {chat_id}")
 
     async def send(self, client: TelegramClient, text: str):
+        """Send message to configured chat (handles bot, user, or channel)."""
+        print(f"[NOTIFIER] Attempting to send message (length: {len(text)} chars)")
+        print(f"[NOTIFIER] Target chat_id: {self.chat_id}")
+        
         try:
-            await client.send_message(int(self.chat_id), text)
-        except Exception:
-            await client.send_message(self.chat_id, text)
+            # Resolve entity once and cache it
+            if self._entity_cache is None:
+                print(f"[NOTIFIER] Resolving entity for: {self.chat_id}")
+                try:
+                    # Try as integer first
+                    chat_id = int(self.chat_id)
+                    print(f"[NOTIFIER] Parsed as integer: {chat_id}")
+                except ValueError:
+                    # Use as string (username)
+                    chat_id = self.chat_id
+                    print(f"[NOTIFIER] Using as string: {chat_id}")
+                
+                # Get and cache the entity
+                self._entity_cache = await client.get_entity(chat_id)
+                print(f"[NOTIFIER] ✅ Entity resolved: {type(self._entity_cache).__name__} (ID: {self._entity_cache.id})")
+            
+            # Send to cached entity
+            print(f"[NOTIFIER] Sending to cached entity...")
+            result = await client.send_message(self._entity_cache, text, parse_mode='markdown')
+            print(f"[NOTIFIER] ✅ Message sent successfully! Message ID: {result.id}")
+            
+        except Exception as e:
+            print(f"[NOTIFIER ERROR] ❌ Failed to send message: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Try fallback without cache
+            print(f"[NOTIFIER] Attempting fallback method 1 (direct int)...")
+            try:
+                result = await client.send_message(int(self.chat_id), text, parse_mode='markdown')
+                print(f"[NOTIFIER] ✅ Fallback 1 succeeded! Message ID: {result.id}")
+            except Exception as e2:
+                print(f"[NOTIFIER ERROR] ❌ Fallback 1 failed: {e2}")
+                
+                # Last resort: try as string
+                print(f"[NOTIFIER] Attempting fallback method 2 (string)...")
+                try:
+                    result = await client.send_message(self.chat_id, text, parse_mode='markdown')
+                    print(f"[NOTIFIER] ✅ Fallback 2 succeeded! Message ID: {result.id}")
+                except Exception as e3:
+                    print(f"[NOTIFIER ERROR] ❌ All attempts failed: {e3}")
+                    import traceback
+                    traceback.print_exc()
 
 
 # --- Core Trader ---
@@ -504,6 +581,13 @@ class Trader:
                                 )
                                 new_oco_id = new_oco.get("orderListId")
                                 print(f"[OCO SUCCESS] override placed qty={safe_qty} TP={final_tp} SL={final_sl}/{final_sl_limit}")
+                                track_oco(symbol, new_oco_id)
+                                emit("oco_tracked", {
+                                    "symbol": symbol,
+                                    "oco_id": new_oco_id,
+                                    "msg": f"OCO tracked (ID {new_oco_id}) for {symbol}"
+                                })
+
                                 break  # success
                             except Exception as e:
                                 msg = str(e).lower()
@@ -635,15 +719,6 @@ async def main():
     binance.prefer_usdc = (cfg.quote_asset.upper() == "USDC")
     trader = Trader(binance, client, notifier)
 
-    print("✅ Notifier and Trader initialized.")
-    emit("bot_start", {"msg": "Signal bot is up"})
-
-    try:
-        await notifier.send(client, "🤖 Signal bot is up and listening.")
-        print("✅ Message sent successfully to notifier chat.")
-    except Exception as e:
-        print(f"❌ Failed to send notifier message: {e}")
-
     # --- SAFETY TASKS: STOP-GAP FLATTEN AUDIT ---
     async def audit_positions_loop():
         interval = float(read_settings_dict().get("flatten_check_interval_min", 10)) * 60
@@ -669,7 +744,7 @@ async def main():
                 await asyncio.sleep(interval)
 
     asyncio.create_task(audit_positions_loop())
-
+    
     # --- SAFETY TASK: HEARTBEAT WATCHDOG ---
     heartbeat_max = float(read_settings_dict().get("heartbeat_max_idle_min", 30))
     print(f"⏱️ Heartbeat watchdog started (max idle {heartbeat_max} min)")
@@ -726,7 +801,7 @@ async def main():
         
         if not sig:
             print(f"[❌ PARSE] Failed to parse signal")
-            emit("ignored", {"reason": "parse_failed", "text": text[:200]})
+            emit("ignored", {"reason": "parse_failed", "msg": f"Ignored unparseable signal: {text[:80]}..."})
             return
 
         print(f"[✅ PARSED] {sig.currency_display} @ {sig.entry}")
@@ -745,15 +820,254 @@ async def main():
             await notifier.send(client, f"❌ Error: {e!r}")
 
     # Heartbeat task
-    async def heart():
-        while True:
-            await asyncio.sleep(10)
-            maybe_reload_settings()
-            emit("heartbeat", {"dry_run": SETTINGS.dry_run})
+    # async def heart():
+        # while True:
+            # await asyncio.sleep(10)
+            # maybe_reload_settings()
+            # await emit_system_status()
 
-    asyncio.create_task(heart())
+    # asyncio.create_task(heart())
+
+    # --- SAFETY TASK: FLATTEN WATCHDOG ---
+    async def flatten_watchdog():
+        """Checks if any position has no TP/SL protection."""
+        cfg_dict = read_settings_dict()
+        interval = float(cfg_dict.get("flatten_check_interval_min", 10)) * 60
+        print(f"🛡️ Flatten watchdog started (every {interval/60:.1f} min)")
+        await asyncio.sleep(interval)  # <-- wait the configured time before first check
+
+        while True:
+            try:
+                # --- Fetch open balances ---
+                bal = binance.exchange.fetch_balance()
+                open_assets = {
+                    a: b for a, b in bal["free"].items()
+                    if a not in ("USDT", "USDC", "BUSD") and b > 0
+                }
+
+                for asset, qty in open_assets.items():
+                    # --- Try both common quote assets ---
+                    possible_quotes = ["USDC", "USDT"]
+                    sym = None
+                    for quote in possible_quotes:
+                        try:
+                            _ = _get_symbol_info(f"{asset}{quote}")
+                            sym = f"{asset}/{quote}"
+                            break
+                        except Exception:
+                            continue
+                    if not sym:
+                        continue  # no valid market found for this asset
+
+                    # --- Check exchange min lot size (skip dust) ---
+                    tick, step = _get_tick_and_step(sym.replace("/", ""))
+                    if qty < step:
+                        # Too small to trade, ignore
+                        continue
+
+                    # --- Fetch current open orders for this symbol ---
+                    try:
+                        orders = binance.exchange.fetch_open_orders(sym)
+                    except Exception:
+                        continue
+
+                    # --- Detect missing protection orders ---
+                    tp_present = any("TAKE_PROFIT" in o["type"].upper() for o in orders)
+                    sl_present = any("STOP_LOSS" in o["type"].upper() for o in orders)
+
+                    # Flatten only if BOTH are missing (safer)
+                    if not tp_present and not sl_present:
+                        msg = f"⚠️ Flatten: {sym} missing TP/SL — flattening {qty:.4f}"
+                        print(msg)
+                        emit("flatten_check", {
+                            "symbol": sym,
+                            "qty": qty,
+                            "msg": f"Flatten check triggered for {sym} (qty {qty:.4f})"
+                        })
+                        await notifier.send(client, msg)
+                        try:
+                            binance.exchange.create_order(sym, "market", "sell", qty)
+                            emit("flatten_sell", {
+                                "symbol": sym,
+                                "qty": qty,
+                                "msg": f"Flatten SELL executed for {sym} ({qty:.4f})"
+                            })
+                        except Exception as e:
+                            emit("flatten_error", {"symbol": sym, "error": str(e)})
+                            await log_error(f"Flatten error: {sym} {e}")
+
+                await asyncio.sleep(interval)
+
+            except Exception as e:
+                await log_error(f"flatten watchdog error: {e}")
+                await asyncio.sleep(interval)
+
+    # --- ORDER MONITORING TASK: Detect TP/SL hits ---
+    async def monitor_orders_loop():
+        """Monitor open OCO orders and notify when TP or SL is hit."""
+        tracked_orders = {}  # {order_id: {"symbol": "BTC/USDT", "type": "TP", "price": 50000}}
+        
+        while True:
+            try:
+                await asyncio.sleep(15)  # Check every 15 seconds
+                
+                # Fetch all open orders
+                open_orders = binance.exchange.fetch_open_orders()
+                open_order_ids = {o['id'] for o in open_orders}
+                
+                # Track new OCO orders
+                for order in open_orders:
+                    if order['id'] not in tracked_orders:
+                        order_type = "TP" if "TAKE_PROFIT" in order['type'] else "SL" if "STOP_LOSS" in order['type'] else None
+                        if order_type:
+                            tracked_orders[order['id']] = {
+                                "symbol": order['symbol'],
+                                "type": order_type,
+                                "price": order.get('stopPrice') or order.get('price'),
+                                "amount": order['amount']
+                            }
+                
+                # Detect filled orders (no longer in open orders)
+                filled_ids = set(tracked_orders.keys()) - open_order_ids
+                for order_id in filled_ids:
+                    info = tracked_orders.pop(order_id)
+                    
+                    # Fetch the order to confirm it was filled (not just canceled)
+                    try:
+                        order = binance.exchange.fetch_order(order_id, info['symbol'])
+                        if order['status'] == 'closed' and order['filled'] > 0:
+                            # Order was filled!
+                            emoji = "🎯" if info['type'] == "TP" else "🛑"
+                            msg = (
+                                f"{emoji} **{info['type']} HIT!**\n"
+                                f"Symbol: `{info['symbol']}`\n"
+                                f"Price: `${info['price']:.6f}`\n"
+                                f"Amount: `{info['amount']:.8f}`\n"
+                                f"Status: Filled ✅"
+                            )
+                            await notifier.send(client, msg)
+                            emit("order_filled", {
+                                "symbol": info['symbol'],
+                                "type": info['type'],
+                                "price": info['price'],
+                                "amount": info['amount']
+                            })
+                    except Exception as e:
+                        print(f"[ORDER MONITOR] Error fetching order {order_id}: {e}")
+                        
+            except Exception as e:
+                await log_error(f"order monitor error: {e}")
+                await asyncio.sleep(15)
+
+    # --- OCO MONITOR LOOP (Spot-compatible version) -----------------------------
+    async def monitor_tracked_oco_loop():
+        """Poll order history instead of get_oco_order; works for Spot/subaccounts."""
+        bin_client = Client(os.environ["BINANCE_API_KEY"], os.environ["BINANCE_API_SECRET"])
+
+        while True:
+            try:
+                tracked = list_tracked_oco()
+                if not tracked:
+                    await asyncio.sleep(5)
+                    continue
+
+                for oco_id, meta in list(tracked.items()):
+                    symbol = meta["symbol"].replace("/", "").upper()
+
+                    try:
+                        # fetch recent order history for this symbol
+                        recent = bin_client.get_all_orders(symbol=symbol, limit=10)
+                        tp_hit = sl_hit = None
+
+                        for o in reversed(recent):
+                            # Binance tags OCO children with orderListId
+                            if str(o.get("orderListId")) != str(oco_id):
+                                continue
+                            if (o.get("status") or "").upper() == "FILLED":
+                                o_type = (o.get("type") or "").upper()
+                                o_price = o.get("price") or o.get("stopPrice") or "0"
+                                o_exec = float(o.get("executedQty", 0) or 0.0)
+                                if o_exec <= 0:
+                                    continue
+                                # --- classify by both type and price relation ---
+                                fill_price = float(o_price)
+                                entry_price = float(meta.get("entry", 0) or 0)  # store entry when you track OCOs if possible
+
+                                # fallback if entry not stored: decide by relative distance to mid-price
+                                if entry_price == 0:
+                                    entry_price = fill_price  # neutral default
+
+                                if "STOP" in o_type:
+                                    sl_hit = (o_price, o_exec)
+                                elif "TAKE_PROFIT" in o_type:
+                                    tp_hit = (o_price, o_exec)
+                                else:
+                                    # unknown / mis-labelled type → decide by price vs entry
+                                    if fill_price < entry_price:
+                                        sl_hit = (o_price, o_exec)
+                                    else:
+                                        tp_hit = (o_price, o_exec)
+
+                        if tp_hit:
+                            p, q = tp_hit
+                            await notifier.send(
+                                client,
+                                f"🎯 **TP HIT!**\nSymbol: `{meta['symbol']}`\nPrice: `${float(p):.6f}`\nQty: `{q}`"
+                            )
+                            emit("order_filled", {"symbol": meta["symbol"], "type": "TP", "price": float(p), "amount": q})
+                            untrack_oco(oco_id)
+                            continue
+
+                        if sl_hit:
+                            p, q = sl_hit
+                            await notifier.send(
+                                client,
+                                f"🛑 **SL HIT!**\nSymbol: `{meta['symbol']}`\nPrice: `${float(p):.6f}`\nQty: `{q}`"
+                            )
+                            emit("order_filled", {"symbol": meta["symbol"], "type": "SL", "price": float(p), "amount": q})
+                            untrack_oco(oco_id)
+                            continue
+
+                    except Exception as e:
+                        await log_error(f"OCO history poll error {meta['symbol']} ({oco_id}): {e}")
+
+                await asyncio.sleep(5)
+
+            except Exception as e:
+                await log_error(f"OCO monitor loop fatal error: {e}")
+                await asyncio.sleep(5)
+
     
-    print("🚀 Bot is now running. Waiting for messages...")
+    # --- SAFETY TASK STARTER: delay watchdog startup ---
+    async def start_flatten_watchdog():
+        cfg_dict = read_settings_dict()
+        interval = float(cfg_dict.get("flatten_check_interval_min", 10)) * 60
+        print(f"🕒 Delaying flatten watchdog start by {interval/60:.1f} min...")
+        await asyncio.sleep(interval)  # wait full interval before enabling
+        print("🛡️ Flatten watchdog now active.")
+        asyncio.create_task(flatten_watchdog())
+
+    asyncio.create_task(start_flatten_watchdog())
+
+    # --- BACKEND PING LOOP (for UI health monitoring) ---
+    async def backend_ping_loop():
+        """Writes runtime/backend.ping every 10 seconds so ui_server knows backend is alive."""
+        path = os.path.join("runtime", "backend.ping")
+        while True:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(str(time.time()))
+                os.utime(path, None)
+            except Exception as e:
+                await log_error(f"backend ping error: {e}")
+            await asyncio.sleep(10)  # ✅ ping every 10 seconds
+
+    asyncio.create_task(backend_ping_loop())
+    
+    # Start the order monitor
+    asyncio.create_task(monitor_orders_loop())
+    asyncio.create_task(monitor_tracked_oco_loop())
+
     await client.run_until_disconnected()
 
 

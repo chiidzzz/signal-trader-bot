@@ -17,11 +17,12 @@ body {
 header {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   padding: 14px 18px;
   border-bottom: 1px solid #1e2a36;
   background: #0d141c;
-  position: sticky;
+  position: relative;
   top: 0;
 }
 h1,
@@ -149,4 +150,22 @@ button:hover {
   z-index: 100;
   font-size: 13px;
   white-space: pre-wrap;
+}
+
+.header-left {
+  position: absolute;
+  left: 1rem;
+}
+
+.status-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.status-text {
+  font-weight: 600;
+  font-size: 15px;
+  color: #ccc;
 }

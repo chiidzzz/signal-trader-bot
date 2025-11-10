@@ -1,9 +1,11 @@
 const evBox = document.getElementById("events");
 const statusDot = document.getElementById("status-dot");
+const statusText = document.getElementById("status-text");
 const cfgForm = document.getElementById("cfgForm");
 const saveInfo = document.getElementById("saveInfo");
 
 let es;
+let lastBackend = Date.now();
 
 // -----------------------------------------------------------------------------
 // Live Events (SSE)
@@ -14,29 +16,48 @@ function connectSSE() {
 
   es.onopen = () => {
     statusDot.className = "dot green";
-    statusDot.title = "connected";
+    statusDot.title = "Connected";
   };
+
   es.onerror = () => {
     statusDot.className = "dot gray";
-    statusDot.title = "reconnecting…";
-    // retry after short backoff
+    statusDot.title = "Reconnecting…";
     setTimeout(connectSSE, 2000);
   };
+
   es.onmessage = (e) => {
     try {
       const obj = JSON.parse(e.data);
+
+      // Handle backend status messages (update status bar ONLY, don't log)
+      if (obj.type === "status_text") {
+        statusText.textContent = obj.msg;
+        const isDown =
+          obj.msg.includes("DOWN") ||
+          obj.msg.includes("🚨") ||
+          obj.msg.includes("⚠️");
+        statusText.style.color = isDown ? "gold" : "limegreen";
+        statusDot.className = isDown ? "dot orange" : "dot green";
+        lastBackend = Date.now();
+        return; // ✅ DON'T render status updates in event log
+      }
+
+      // Normal log events - render these
       renderEvent(obj);
     } catch {
-      // ignore non-JSON lines (e.g., comments/keepalive)
+      // ignore malformed lines
     }
   };
 }
 
+// -----------------------------------------------------------------------------
+// Event rendering
+// -----------------------------------------------------------------------------
 function renderEvent(ev) {
   const d = new Date(ev.ts * 1000).toLocaleTimeString();
   const el = document.createElement("div");
   el.className = "event";
-  el.textContent = `[${d}] ${ev.type} :: ${JSON.stringify(ev)}`;
+  el.textContent = `[${d}] ${ev.msg || ev.type} `;
   evBox.prepend(el);
   while (evBox.childNodes.length > 500) evBox.removeChild(evBox.lastChild);
 }
@@ -53,36 +74,28 @@ async function loadConfig() {
       const el = cfgForm.querySelector(`[name="${name}"]`);
       if (!el) return;
       if (el.type === "checkbox") {
-        if (typeof val === "boolean") el.checked = val; // only set when boolean provided
-      } else {
-        if (val !== undefined && val !== null) el.value = val;
+        el.checked = !!val;
+      } else if (val !== undefined && val !== null) {
+        el.value = val;
       }
     }
 
-    // Core options
+    // Core settings
     set("dry_run", cfg.dry_run);
     set("quote_asset", cfg.quote_asset);
     set("capital_entry_pct_default", cfg.capital_entry_pct_default);
     set("max_slippage_pct", cfg.max_slippage_pct);
     set("use_limit_if_slippage_exceeds", cfg.use_limit_if_slippage_exceeds);
-
-    // Guards
     set("respect_spot_only", cfg.respect_spot_only);
     set("min_notional_usdt", cfg.min_notional_usdt);
     set("limit_time_in_force_sec", cfg.limit_time_in_force_sec);
-
-    // Symbol resolution
     set("prefer_symbol_in_parentheses", cfg.prefer_symbol_in_parentheses);
     set("fallback_to_name_search", cfg.fallback_to_name_search);
-
-    // TP/SL Overrides
     set("override_tp_enabled", cfg.override_tp_enabled);
     set("override_tp_pct", cfg.override_tp_pct);
     set("override_sl_enabled", cfg.override_sl_enabled);
     set("override_sl_pct", cfg.override_sl_pct);
     set("override_sl_as_absolute", cfg.override_sl_as_absolute);
-
-    // Safety Watchdogs - FIXED: now properly loading these values
     set("flatten_check_interval_min", cfg.flatten_check_interval_min);
     set("heartbeat_max_idle_min", cfg.heartbeat_max_idle_min);
   } catch (err) {
@@ -95,20 +108,7 @@ async function loadConfig() {
 // -----------------------------------------------------------------------------
 cfgForm.onsubmit = async (e) => {
   e.preventDefault();
-
   const data = {};
-  const get = (n) => cfgForm.querySelector(`[name="${n}"]`);
-
-  const setNested = (path, val) => {
-    const [a, b] = path.split(".");
-    if (!b) {
-      data[a] = val;
-      return;
-    }
-    data[a] = data[a] || {};
-    data[a][b] = val;
-  };
-
   const fields = [
     "dry_run",
     "quote_asset",
@@ -130,19 +130,15 @@ cfgForm.onsubmit = async (e) => {
   ];
 
   for (const name of fields) {
-    const el = get(name);
+    const el = cfgForm.querySelector(`[name="${name}"]`);
     if (!el) continue;
-    let val;
-    if (el.type === "checkbox") {
-      val = el.checked;
-    } else if (el.type === "number") {
-      // FIXED: Properly handle number inputs, including when they're empty
-      const num = Number(el.value);
-      val = isNaN(num) ? null : num;
-    } else {
-      val = el.value;
-    }
-    setNested(name, val);
+    let val =
+      el.type === "checkbox"
+        ? el.checked
+        : el.type === "number"
+        ? Number(el.value)
+        : el.value;
+    data[name] = val;
   }
 
   saveInfo.textContent = "Saving…";
@@ -152,16 +148,15 @@ cfgForm.onsubmit = async (e) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
-
     if (res.ok) {
-      saveInfo.textContent = "Saved ✔️ (bot reloads shortly)";
-      setTimeout(() => (saveInfo.textContent = ""), 3000);
+      saveInfo.textContent = "Saved ✔️";
+      setTimeout(() => (saveInfo.textContent = ""), 2000);
     } else {
-      saveInfo.textContent = "Failed to save ❌";
+      saveInfo.textContent = "Failed ❌";
     }
   } catch (err) {
-    console.error("Save error:", err);
-    saveInfo.textContent = "Failed to save ❌";
+    console.error(err);
+    saveInfo.textContent = "Failed ❌";
   }
 };
 
@@ -169,4 +164,16 @@ cfgForm.onsubmit = async (e) => {
 // Init
 // -----------------------------------------------------------------------------
 connectSSE();
+
+// -----------------------------------------------------------------------------
+// Frontend heartbeat file (lets backend know UI is alive)
+// -----------------------------------------------------------------------------
+setInterval(async () => {
+  try {
+    await fetch("/api/ping", { method: "POST" });
+  } catch {
+    // ignore errors silently
+  }
+}, 5000); // every 5s (more frequent = more reliable detection)
+
 loadConfig();

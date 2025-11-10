@@ -13,7 +13,7 @@ override_tp_pct: 0.02
 override_sl_enabled: false
 override_sl_pct: 0.01
 override_sl_as_absolute: false
-flatten_check_interval_min: 1
+flatten_check_interval_min: 2
 heartbeat_max_idle_min: 30
 pnl_log_path: runtime/pnl_log.csv
 error_log_path: runtime/errors.log

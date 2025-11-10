@@ -1,20 +1,26 @@
-# ui_server.py
-import os, json, time, asyncio, yaml
+import os, json, time, asyncio, yaml, importlib
 from typing import AsyncGenerator
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
+from dotenv import load_dotenv
+
+
+# --- load .env automatically ---
+load_dotenv()
 
 RUNTIME_DIR = "runtime"
 EVENTS_FILE = os.path.join(RUNTIME_DIR, "events.jsonl")
 STATE_FILE = os.path.join(RUNTIME_DIR, "state.json")
+STATUS_FILE = os.path.join(RUNTIME_DIR, "status.json")  # New: separate status file
 CONFIG_FILE = "config.yaml"
 
 os.makedirs(RUNTIME_DIR, exist_ok=True)
 
 app = FastAPI(title="Signals Bot UI")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 # -------------------- helpers --------------------
 def load_config_dict() -> dict:
@@ -26,6 +32,7 @@ def load_config_dict() -> dict:
     except Exception:
         return {}
 
+
 def deep_merge(a: dict, b: dict) -> dict:
     """Merge b into a (in place) preserving nested sections."""
     for k, v in (b or {}).items():
@@ -35,6 +42,7 @@ def deep_merge(a: dict, b: dict) -> dict:
             a[k] = v
     return a
 
+
 def save_config_dict(new_data: dict):
     current = load_config_dict()
     merged = deep_merge(current, new_data)
@@ -42,20 +50,24 @@ def save_config_dict(new_data: dict):
         yaml.safe_dump(merged, f, sort_keys=False, allow_unicode=True)
     os.utime(CONFIG_FILE, None)
 
+
 # -------------------- routes --------------------
 @app.get("/", response_class=HTMLResponse)
 def index():
     return FileResponse("static/index.html")
 
+
 @app.get("/api/config")
 def get_config():
     return JSONResponse(load_config_dict())
+
 
 @app.post("/api/config")
 async def set_config(req: Request):
     data = await req.json()
     save_config_dict(data)
     return JSONResponse({"ok": True})
+
 
 @app.get("/api/state")
 def get_state():
@@ -64,45 +76,69 @@ def get_state():
     with open(STATE_FILE, "r", encoding="utf-8") as f:
         return JSONResponse(json.load(f))
 
-# Optional: simple health for debugging
+
 @app.get("/api/health")
 def health():
     return JSONResponse({"ok": True, "ts": time.time()})
 
-# -------------------- SSE (resilient) --------------------
+
+@app.post("/api/ping")
+async def ping():
+    """Frontend heartbeat – updates a file so backend knows UI is alive."""
+    FRONTEND_PING = os.path.join(RUNTIME_DIR, "frontend.ping")
+    try:
+        with open(FRONTEND_PING, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+        os.utime(FRONTEND_PING, None)
+    except Exception as e:
+        print(f"⚠️ Failed to update frontend.ping: {e}")
+    return JSONResponse({"ok": True, "ts": time.time()})
+
+
+# -------------------- SSE (status + Telegram alerts) --------------------
 @app.get("/events")
 async def events(request: Request):
-    async def event_gen() -> AsyncGenerator[str, None]:
-        # ensure file exists
+    last_status_ts = 0
+
+    async def event_gen():
+        nonlocal last_status_ts
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
         with open(EVENTS_FILE, "a", encoding="utf-8"):
             pass
-        try:
-            f = open(EVENTS_FILE, "r", encoding="utf-8")
-        except Exception:
-            # if file cannot be opened, still keep the connection alive
-            last_ka = time.time()
-            while not await request.is_disconnected():
-                if time.time() - last_ka > 10:
-                    yield {"event": "message", "data": json.dumps({"ts": int(time.time()), "type": "keepalive"})}
-                    last_ka = time.time()
-                await asyncio.sleep(1.0)
-            return
 
-        f.seek(0, os.SEEK_END)
-        last_keepalive = time.time()
-        while not await request.is_disconnected():
-            line = f.readline()
-            if line:
-                yield {"event": "message", "data": line.strip()}
-            else:
-                # periodic keepalive (avoid ERR_INCOMPLETE_CHUNKED_ENCODING)
-                if time.time() - last_keepalive > 10:
-                    yield {"event": "message", "data": json.dumps({"ts": int(time.time()), "type": "keepalive"})}
-                    last_keepalive = time.time()
-                await asyncio.sleep(1.0)
         try:
-            f.close()
-        except Exception:
-            pass
+            with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+                f.seek(0, os.SEEK_END)
+                while not await request.is_disconnected():
+                    # Send status updates from separate status file (check every cycle)
+                    if os.path.exists(STATUS_FILE):
+                        try:
+                            status_mtime = os.path.getmtime(STATUS_FILE)
+                            if status_mtime > last_status_ts:
+                                with open(STATUS_FILE, "r", encoding="utf-8") as sf:
+                                    status = json.load(sf)
+                                    last_status_ts = status_mtime
+                                    status_event = {
+                                        "ts": status.get("ts", int(time.time())),
+                                        "type": "status_text",
+                                        "msg": status.get("msg", "Status unknown")
+                                    }
+                                    yield {"event": "message", "data": json.dumps(status_event)}
+                        except Exception as e:
+                            print(f"⚠️ Status read error: {e}")
+
+                    # Send regular event log messages
+                    line = f.readline()
+                    if line:
+                        try:
+                            # Validate that it's valid JSON before sending
+                            json.loads(line)
+                            yield {"event": "message", "data": line.strip()}
+                        except json.JSONDecodeError:
+                            print(f"⚠️ Skipping malformed line in events.jsonl: {line.strip()[:100]}")
+                    
+                    await asyncio.sleep(1.0)
+        except Exception as e:
+            print(f"❌ Error in event_gen: {e}")
 
     return EventSourceResponse(event_gen())

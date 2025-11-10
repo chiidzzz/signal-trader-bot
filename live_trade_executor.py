@@ -254,6 +254,14 @@ def place_bracket_atomic(
         if not verify_oco(oco_id, verify_timeout_sec):
             market_sell(symbol, filled_qty)
             raise RuntimeError(f"OCO verification failed (ID={oco_id}); flattened position")
+        
+        # Record OCO for monitoring
+        try:
+            from signal_trader import track_oco
+            track_oco(symbol, oco_id)
+        except Exception as e:
+            print(f"[OCO TRACK] Could not record OCO {oco_id}: {e}")
+
 
     except Exception as e:
         try:

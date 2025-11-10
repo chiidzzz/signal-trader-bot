@@ -11,8 +11,13 @@
 
 <body>
     <header>
-        <h1>📈 Signals Bot Dashboard</h1>
-        <span id="status-dot" class="dot gray" title="disconnected"></span>
+        <div class="header-left">
+            <h1>📈 Signals Bot Dashboard</h1>
+        </div>
+        <div id="status-area" class="status-center">
+            <span id="status-dot" class="dot gray" title="disconnected"></span>
+            <span id="status-text" class="status-text">Awaiting status...</span>
+        </div>
     </header>
 
     <main class="grid" style="grid-template-columns: 2fr 2fr;">
