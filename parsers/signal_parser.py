@@ -221,6 +221,19 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
     tp1 = clean_num(tp_values[0]) if len(tp_values) >= 1 else None
     tp2 = clean_num(tp_values[1]) if len(tp_values) >= 2 else None
     tp3 = clean_num(tp_values[2]) if len(tp_values) >= 3 else None
+    
+    # --- Normalize numeric precision to Binance-safe float ---
+    def _normalize_price(v):
+        try:
+            return round(float(v), 6) if v is not None else None
+        except Exception:
+            return None
+
+    stop_val = _normalize_price(stop_val)
+    tp1 = _normalize_price(tp1)
+    tp2 = _normalize_price(tp2)
+    tp3 = _normalize_price(tp3)
+
 
     # If still no TP1 for some reason, abort
     if tp1 is None:
