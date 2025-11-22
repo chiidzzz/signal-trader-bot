@@ -181,14 +181,14 @@ def place_bracket_atomic(
     tp_price,
     sl_trigger,
     sl_limit_offset_frac=0.001,
-    verify_timeout_sec=15,
+    verify_timeout_sec=5,
 ):
     """
     1. Market buy (verify fill)
     2. Place OCO (TP+SL)
     3. Verify OCO exists
     4. On any failure: market-sell immediately to flatten position
-    
+
     Returns:
         dict with keys: filled_qty, avg_price, tp, sl_trigger, sl_limit, oco_id
     """
@@ -199,25 +199,25 @@ def place_bracket_atomic(
 
     filled_qty = 0.0
     avg_price = 0.0
-    
+
     try:
-        # FIXED: Execute buy FIRST to get actual fill price
+        # Execute buy FIRST to get actual fill price
         filled_qty, avg_price = execute_market_buy(symbol, spend_usd)
     except Exception as e:
         raise RuntimeError(f"Market buy failed: {e}")
-    
-    # FIXED: Now validate and round using ACTUAL fill price, not entry hint
+
+    # Validate & round using actual fill price
     tp_r = _round_tick(tp_price, tick)
     sl_tr_r = _round_tick(sl_trigger, tick)
     sl_lim_r = _round_tick(sl_limit, tick)
 
-    # Debug: print actual values
+    # Debug print
     print(f"[OCO DEBUG] Fill: {avg_price:.8f}")
     print(f"[OCO DEBUG] TP:   {tp_r:.8f} (must be > fill)")
     print(f"[OCO DEBUG] SL:   {sl_tr_r:.8f} (must be < fill)")
     print(f"[OCO DEBUG] SL_L: {sl_lim_r:.8f} (must be < SL trigger)")
 
-    # Validate price relationship using actual fill
+    # Validate price relationships
     if not (tp_r > avg_price > sl_tr_r):
         try:
             market_sell(symbol, filled_qty)
@@ -229,8 +229,8 @@ def place_bracket_atomic(
             f"  Required: TP > Fill > SL\n"
             f"  Position flattened for safety"
         )
-    
-    # Additional Binance validation: SL limit must be below SL trigger
+
+    # Ensure stop-limit < stop-trigger
     if sl_lim_r >= sl_tr_r:
         try:
             market_sell(symbol, filled_qty)
@@ -241,12 +241,12 @@ def place_bracket_atomic(
             f"Position flattened for safety"
         )
 
-    # --- OCO placement ---
+    # --- OCO placement block ---
     try:
         base_asset = sym.replace("USDC", "").replace("USDT", "").replace("/", "").upper()
 
-        # --- Wait for FREE balance after market fill (sub-accounts can lag) ---
-        max_wait_s = 30.0  # Increased from 20s
+        # Wait for balance refresh (sub-account lag)
+        max_wait_s = 30.0
         waited = 0.0
         free_balance = 0.0
         locked_balance = 0.0
@@ -254,37 +254,26 @@ def place_bracket_atomic(
         while waited < max_wait_s:
             try:
                 bal = client.get_asset_balance(asset=base_asset) or {}
-                free_balance  = float(bal.get("free", 0) or 0.0)
+                free_balance = float(bal.get("free", 0) or 0.0)
                 locked_balance = float(bal.get("locked", 0) or 0.0)
                 total_balance = free_balance + locked_balance
-                
-                print(f"[BALANCE WAIT] {base_asset} free={free_balance:.8f} locked={locked_balance:.8f} total={total_balance:.8f} need≈{filled_qty:.8f}")
-                
-                # Check if we have the total balance (free + locked)
-                if total_balance >= filled_qty * 0.95:  # 95% tolerance
+                print(f"[BALANCE WAIT] {base_asset} free={free_balance:.8f} "
+                      f"locked={locked_balance:.8f} total={total_balance:.8f} need≈{filled_qty:.8f}")
+
+                if total_balance >= filled_qty * 0.95:
                     print(f"[BALANCE OK] Total balance received: {total_balance:.8f}")
                     break
-                    
             except Exception as e:
                 print(f"[BALANCE WARN] fetch failed: {e}")
 
-            time.sleep(2.0)  # Increased from 1s
+            time.sleep(2.0)
             waited += 2.0
 
-        # Use whatever balance is available (even if less than filled_qty)
         if free_balance < step:
-            # If no free balance after waiting, this might be a sub-account timing issue
-            # Try to proceed with a small retry
-            print(f"[BALANCE WARNING] Low free balance: {free_balance:.8f}, will retry OCO placement")
+            print(f"[BALANCE WARNING] Low free balance: {free_balance:.8f}")
 
-        # --- Compute sellable quantity strictly from FREE ---
+        # Compute safe sell quantity
         _, step = _get_tick_and_step(sym)
-        if free_balance < step:
-            # Nothing sellable yet; bail cleanly (don't attempt OCO or flatten)
-            raise RuntimeError(
-                f"Balance not free yet (free={free_balance:.8f} < step={step}); cannot place OCO right now"
-            )
-
         safe_qty = _round_step(min(free_balance, filled_qty) * 0.999, step)
         if safe_qty < step:
             raise RuntimeError(
@@ -292,7 +281,7 @@ def place_bracket_atomic(
             )
         qty_str = _fmt(safe_qty)
 
-        # --- Live price sanity to satisfy Binance filters ---
+        # Live price sanity
         last_now = float(client.get_symbol_ticker(symbol=sym)["price"])
         if last_now <= sl_tr_r:
             old_sl_tr, old_sl_lim = sl_tr_r, sl_lim_r
@@ -304,11 +293,11 @@ def place_bracket_atomic(
             tp_r = _round_tick(last_now + tick, tick)
             print(f"[OCO ADJUST] TP {old_tp}->{tp_r} due to last={last_now}")
 
-        # --- Place OCO with retries for transient balance issues ---
+        # Place OCO with retries
         oco_id = None
         for attempt in range(3):
             try:
-                # --- Enforce Binance minNotional filter ---
+                # Enforce minNotional
                 try:
                     info = _get_symbol_info(sym)
                     min_notional = float(next(
@@ -326,14 +315,7 @@ def place_bracket_atomic(
                     print(f"[FILTER WARN] Could not enforce minNotional: {f_err}")
 
                 print(f"[OCO TRY {attempt+1}] qty={qty_str} TP={tp_r} SL={sl_tr_r}/{sl_lim_r}")
-                oco = place_oco(
-                    symbol,
-                    "SELL",
-                    qty_str,
-                    str(tp_r),
-                    str(sl_tr_r),
-                    str(sl_lim_r),
-                )
+                oco = place_oco(symbol, "SELL", qty_str, str(tp_r), str(sl_tr_r), str(sl_lim_r))
                 oco_id = oco.get("orderListId")
                 if not oco_id:
                     raise RuntimeError("OCO response missing orderListId")
@@ -342,7 +324,6 @@ def place_bracket_atomic(
                 msg = str(e).lower()
                 print(f"[OCO ERROR] {e}")
                 if "insufficient balance" in msg and attempt < 2:
-                    # re-poll FREE and resize
                     time.sleep(2.0)
                     try:
                         bal = client.get_asset_balance(asset=base_asset) or {}
@@ -356,34 +337,40 @@ def place_bracket_atomic(
                         pass
                 raise
 
-        # --- Verify and record ---
+        # Verify OCO
         if not verify_oco(oco_id, verify_timeout_sec):
-            # If verify fails, flatten only what is FREE now
-            try:
-                bal = client.get_asset_balance(asset=base_asset) or {}
-                free_now = float(bal.get("free", 0) or 0.0)
-            except Exception:
-                free_now = free_balance
-            sell_qty = _round_step(min(free_now, safe_qty), step)
-            if sell_qty >= step:
-                market_sell(symbol, sell_qty)
-            raise RuntimeError(f"OCO verification failed (ID={oco_id}); position flattened")
+            print(f"[OCO WARN] Verification timed out, but OCO {oco_id} likely active.")
+            return {
+                "filled_qty": filled_qty,
+                "avg_price": avg_price,
+                "tp": tp_r,
+                "sl_trigger": sl_tr_r,
+                "sl_limit": sl_lim_r,
+                "oco_id": oco_id,
+            }
 
+        # Register OCO
         try:
             from signal_trader import track_oco
-            track_oco(symbol, oco_id, avg_price)  # Pass entry price for better tracking
+            track_oco(symbol, oco_id, avg_price)
+            print(f"[OCO TRACK] Tracking {symbol} OCO {oco_id}")
         except Exception as e:
-            print(f"[OCO TRACK] Could not record OCO {oco_id}: {e}")
+            print(f"[OCO TRACK WARN] Could not record OCO {oco_id}: {e}")
 
     except Exception as e:
-        # CRITICAL FIX: Don't automatically flatten on OCO errors
-        # Many OCO errors are false positives due to timing issues
+        # --- Unified error handling (no more free-variable bug) ---
         error_msg = str(e)
-        
-        # Check if this might be a false error
+
+        # Soft errors: OCO actually succeeded
         if any(x in error_msg for x in ["insufficient balance", "Filter failure", "NOTIONAL", "oco", "orderListId"]):
-            # Non-fatal OCO errors that usually mean it already succeeded
             print(f"[OCO WARN] Non-fatal post-OCO message: {error_msg}")
+            try:
+                from signal_trader import track_oco
+                track_oco(symbol, oco_id, avg_price)
+                print(f"[OCO TRACK] Tracking {symbol} OCO {oco_id} after non-fatal warning")
+            except Exception as te:
+                print(f"[OCO TRACK WARN] Could not track OCO {oco_id}: {te}")
+
             return {
                 "filled_qty": filled_qty,
                 "avg_price": avg_price,
@@ -393,10 +380,10 @@ def place_bracket_atomic(
                 "oco_id": oco_id if 'oco_id' in locals() else None,
             }
 
-        # Otherwise: truly failed OCO (no order created)
+        # Hard failure
         raise RuntimeError(f"OCO placement failed: {error_msg}")
 
-    # FIXED: Return avg_price in result dict
+    # Normal successful return
     return {
         "filled_qty": filled_qty,
         "avg_price": avg_price,

@@ -72,21 +72,27 @@ def _write_oco_tracker(d: dict):
     with open(OCO_TRACKER, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
 
-def track_oco(symbol: str, oco_id: int):
+def track_oco(symbol: str, oco_id: int, entry_price: float = 0.0):
+    """Track an OCO order for monitoring. Entry price is optional but helps with classification."""
     d = _read_oco_tracker()
-    d[str(oco_id)] = {"symbol": symbol, "ts": int(time.time())}
+    d[str(oco_id)] = {
+        "symbol": symbol,
+        "ts": int(time.time()),
+        "entry": entry_price  # Store entry price for TP/SL classification
+    }
     _write_oco_tracker(d)
+    print(f"[TRACK_OCO] Added OCO {oco_id} for {symbol} (entry: ${entry_price:.6f})")
 
 def untrack_oco(oco_id: int):
     d = _read_oco_tracker()
     if str(oco_id) in d:
         d.pop(str(oco_id), None)
         _write_oco_tracker(d)
+        print(f"[TRACK_OCO] Removed OCO {oco_id}")
 
 def list_tracked_oco():
     d = _read_oco_tracker()
     return {int(k): v for k, v in d.items()}
-
 
 # --- Models ---
 class TPSet(BaseModel):
@@ -639,6 +645,13 @@ class Trader:
                             "sl": res["sl_trigger"],
                             "oco_id": res["oco_id"]
                         })
+                        # Track the OCO for monitoring
+                        track_oco(symbol, res["oco_id"], actual_fill_price)
+                        emit("oco_tracked", {
+                            "symbol": symbol,
+                            "oco_id": res["oco_id"],
+                            "msg": f"OCO tracked (ID {res['oco_id']}) for {symbol}"
+                        })
 
                 except Exception as e:
                     await self.n.send(self.tg, f"❌ Trade execution failed: {e}")
@@ -830,15 +843,17 @@ async def main():
 
     # --- SAFETY TASK: FLATTEN WATCHDOG ---
     async def flatten_watchdog():
-        """Checks if any position has no TP/SL protection."""
+        """Checks if any position has no TP/SL protection, but skips dust < $10."""
         cfg_dict = read_settings_dict()
         interval = float(cfg_dict.get("flatten_check_interval_min", 10)) * 60
-        print(f"🛡️ Flatten watchdog started (every {interval/60:.1f} min)")
-        await asyncio.sleep(interval)  # <-- wait the configured time before first check
+        MIN_NOTIONAL = 10.0  # <<< NEW: minimum USD value before flatten
+
+        print(f"🛡️ Flatten watchdog started (every {interval/60:.1f} min, min notional ${MIN_NOTIONAL})")
+        await asyncio.sleep(interval)  # wait before first run
 
         while True:
             try:
-                # --- Fetch open balances ---
+                # --- Fetch balances ---
                 bal = binance.exchange.fetch_balance()
                 open_assets = {
                     a: b for a, b in bal["free"].items()
@@ -846,36 +861,45 @@ async def main():
                 }
 
                 for asset, qty in open_assets.items():
-                    # --- Try both common quote assets ---
+                    # Try both markets to find a valid trading symbol
                     possible_quotes = ["USDC", "USDT"]
                     sym = None
-                    for quote in possible_quotes:
-                        try:
-                            _ = _get_symbol_info(f"{asset}{quote}")
-                            sym = f"{asset}/{quote}"
-                            break
-                        except Exception:
-                            continue
-                    if not sym:
-                        continue  # no valid market found for this asset
+                    price = None
 
-                    # --- Check exchange min lot size (skip dust) ---
-                    tick, step = _get_tick_and_step(sym.replace("/", ""))
-                    if qty < step:
-                        # Too small to trade, ignore
+                    for quote in possible_quotes:
+                        pair = f"{asset}/{quote}"
+                        if pair in binance.exchange.markets:
+                            sym = pair
+                            try:
+                                price = float(binance.exchange.fetch_ticker(pair)["last"])
+                            except Exception:
+                                price = None
+                            break
+
+                    if not sym or price is None:
+                        continue  # cannot price the asset, skip
+
+                    # --- NEW: Skip tiny positions under $10 ---
+                    notional = qty * price
+                    if notional < MIN_NOTIONAL:
+                        print(f"⏭️ [SKIP] {sym} value ${notional:.2f} < ${MIN_NOTIONAL} (dust ignored)")
                         continue
 
-                    # --- Fetch current open orders for this symbol ---
+                    # --- Check exchange min lot ---
+                    tick, step = _get_tick_and_step(sym.replace("/", ""))
+                    if qty < step:
+                        continue
+
+                    # --- Fetch open orders for symbol ---
                     try:
                         orders = binance.exchange.fetch_open_orders(sym)
                     except Exception:
                         continue
 
-                    # --- Detect missing protection orders ---
                     tp_present = any("TAKE_PROFIT" in o["type"].upper() for o in orders)
                     sl_present = any("STOP_LOSS" in o["type"].upper() for o in orders)
 
-                    # Flatten only if BOTH are missing (safer)
+                    # Flatten only if BOTH missing
                     if not tp_present and not sl_present:
                         msg = f"⚠️ Flatten: {sym} missing TP/SL — flattening {qty:.4f}"
                         print(msg)
@@ -885,6 +909,7 @@ async def main():
                             "msg": f"Flatten check triggered for {sym} (qty {qty:.4f})"
                         })
                         await notifier.send(client, msg)
+
                         try:
                             binance.exchange.create_order(sym, "market", "sell", qty)
                             emit("flatten_sell", {
