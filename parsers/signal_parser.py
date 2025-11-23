@@ -117,28 +117,45 @@ SPOT_ONLY_KEYS = [r"spot\s*only", r"spot", r"SPOT TRADE", r"فورية"]
 def parse_signal(text: str) -> Optional[ParsedSignal]:
     emit("parse_debug", {"stage": "start", "preview": text[:120]})
 
-    # Currency
-    cur = _m(text, CURRENCY_KEYS)
-    if not cur:
-        # Try formats like: "🔥 XRP (Spot Trade) 🔥"
-        cur_line = re.search(r"([A-Z]{2,10})\s*\(?(?:Spot|Trade|Spot Trade)?\)?", text)
-        if cur_line:
-            cur = cur_line.group(1)
-    # Try to detect things like "Solana / Spot Trading"
-    if not cur:
-        cur_line = re.search(r"([A-Za-z]{2,15})\s*/\s*(?:Spot|Trading|Trade|Spot Trading)", text, re.IGNORECASE)
-        if cur_line:
-            cur = cur_line.group(1)
-    if not cur:
-        cur_line = re.search(r"([A-Za-z]{2,15})\s+(?:Spot|Signal|Trade)", text, re.IGNORECASE)
-        if cur_line:
-            cur = cur_line.group(1)
+        # -------------------------------
+    #  CURRENCY EXTRACTION (FIXED)
+    # -------------------------------
+    emit("parse_debug", {"stage": "currency_start", "preview": text[:120]})
 
-    if not cur:
-        # As final fallback: "XRP / USDT"
-        cur_line = re.search(r"[A-Z]{2,10}\s*/\s*[A-Z]{2,5}", text)
-        if cur_line:
-            cur = cur_line.group(0)
+    # 1️⃣ Highest-priority rule:
+    # If the signal includes something like "(ZEN)", ALWAYS use it.
+    paren = re.search(r"\(([A-Z0-9]{2,10})\)", text)
+    if paren:
+        cur = paren.group(1)
+    else:
+        # 2️⃣ Try regular "Currency:" / "Coin:" formats
+        cur = _m(text, CURRENCY_KEYS)
+
+        # 3️⃣ Fallback: things like "Solana / Spot Trading"
+        if not cur:
+            cur_line = re.search(r"([A-Za-z]{2,15})\s*/\s*(?:Spot|Trading|Trade|Spot Trading)", text, re.IGNORECASE)
+            if cur_line:
+                cur = cur_line.group(1)
+
+        # 4️⃣ Fallback: "Solana Spot Signal", "XRP Spot", etc.
+        if not cur:
+            cur_line = re.search(r"([A-Za-z]{2,15})\s+(?:Spot|Signal|Trade)", text, re.IGNORECASE)
+            if cur_line:
+                cur = cur_line.group(1)
+
+        # 5️⃣ Final fallback: sometimes coin is written bare like "XRP (Spot Trade)"
+        if not cur:
+            cur_line = re.search(r"([A-Z]{2,10})\s*\(?(?:Spot|Trade|Spot Trade)?\)?", text)
+            if cur_line:
+                cur = cur_line.group(1)
+
+        # 6️⃣ Last-chance: direct pair "XRP/USDT"
+        if not cur:
+            cur_line = re.search(r"[A-Z]{2,10}\s*/\s*[A-Z]{2,5}", text)
+            if cur_line:
+                cur = cur_line.group(0)
+
+    emit("parse_debug", {"stage": "currency_extracted", "currency": cur})
 
     # Entry (supports single or range)
     entry_match = None
