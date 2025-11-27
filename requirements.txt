@@ -4,6 +4,7 @@ pydantic==2.9.2
 python-dotenv==1.0.1
 PyYAML==6.0.2
 tenacity==9.0.0
+python-binance==1.0.19
 
 # Web UI
 fastapi==0.115.4

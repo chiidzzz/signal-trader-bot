@@ -1,15 +1,28 @@
-# parsers/signal_parser.py
 import re
 from typing import Optional
 from dataclasses import dataclass
 from pydantic import BaseModel
 from utils.events import emit
 
+# For smart fallback
+import json
+import os
+
+# Load aliases for fallback (LITECOIN -> LTC, Horizen -> ZEN, etc.)
+ALIASES_PATH = os.path.join(os.path.dirname(__file__), "..", "token_aliases.json")
+try:
+    with open(ALIASES_PATH, "r", encoding="utf-8") as f:
+        TOKEN_ALIASES = {k.upper(): v.upper() for k, v in json.load(f).items()}
+except:
+    TOKEN_ALIASES = {}
+
+
 # ---------- Models ----------
 class TPSet(BaseModel):
     tp1: float
     tp2: Optional[float] = None
     tp3: Optional[float] = None
+
 
 @dataclass
 class ParsedSignal:
@@ -23,6 +36,7 @@ class ParsedSignal:
     period_hours: Optional[int]
     spot_only: bool = True
 
+
 # ---------- Helpers ----------
 def _m(text, pats):
     for p in pats:
@@ -31,9 +45,10 @@ def _m(text, pats):
             return m.group(1) if m.lastindex else m.group(0)
     return None
 
+
 def clean_num(val: str) -> float:
-    # Normalize things like "$4,100.50", " 4.10 ", "4.10%" etc.
     return float(re.sub(r"[^\d.]", "", val.replace(",", "")))
+
 
 def extract_symbol_hint(line: str):
     line = line.strip()
@@ -45,6 +60,7 @@ def extract_symbol_hint(line: str):
         return line, s.group(1)
     return line, None
 
+
 def days_or_hours_to_hours(text: str):
     t = text.lower()
     if m := re.search(r"(\d+)\s*(day|days)", t):
@@ -52,6 +68,7 @@ def days_or_hours_to_hours(text: str):
     if m := re.search(r"(\d+)\s*(hour|hours)", t):
         return int(m.group(1))
     return None
+
 
 # ---------- Regex Patterns ----------
 CURRENCY_KEYS = [
@@ -63,7 +80,6 @@ CURRENCY_KEYS = [
 ]
 
 ENTRY_KEYS = [
-    # Handles single price or range, with optional $ and bold/escaped $ and fancy dashes
     r"Entry(?: Price| Zone)?\s*[:\-]\s*\*?\\?\$?([\d\.,]+)\*?(?:\s*[–\-—]\s*\*?\\?\$?([\d\.,]+)\*?)?",
     r"سعر\s*الدخول\s*[:\-]\s*\*?\\?\$?([\d\.,]+)\*?(?:\s*[–\-—]\s*\*?\\?\$?([\d\.,]+)\*?)?",
     r"Einstieg(?:szone)?\s*[:\-]\s*\*?\\?\$?([\d\.,]+)\*?(?:\s*[–\-—]\s*\*?\\?\$?([\d\.,]+)\*?)?",
@@ -75,8 +91,6 @@ STOP_KEYS = [
     r"Stop-?Loss\s*[:\-]\s*\*?\\?\$?([\d\.,]+)\*?",
 ]
 
-# --- TP patterns ---
-# Keep your existing list exactly as requested, then we append more catch-alls.
 TP_KEYS = [
     r"TP1\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
     r"TP2\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
@@ -88,14 +102,11 @@ TP_KEYS = [
     r"Ziel\s*\d*\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
 ]
 
-# Additional flexible patterns we append (do NOT change the ones above)
-# These catch variants like "Take Profit 1: 3.33", "TP 2 -> 3.44", etc.
 TP_KEYS += [
     r"Take\s*Profit\s*(?:1|2|3|4)\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
     r"TP\s*(?:1|2|3|4)\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
-    r"Take\s*Profits?\s*[:\-–—]\s*\$?([\d\.,]+)",  # sometimes a single "Take Profits: 4.10"
-    # Fallback for bullet-style under a TP section: lines that are just numbers with arrows
-    r"(?:^|\n)\s*[•\-\u25AA\u25CF\u25E6\u2022\u25AB\u25A0\u25C6\u25C7\u25B8\u25B9\u25B6\u25B7\u279C\u2794\u27A1\u27F6\u27F7\u2799\u279A\u279B\u27A4\u27B3\u27B2\u27BD\u27BE\u27A5\u27A6\u27A7\u27A8\u27A9\u27AB\u27AC\u27AD\u27AE\u27AF\u27B0\u27B1\u27BB\u27BC]?\s*\$?([\d\.,]+)\s*(?:[+→➝>\-–—]\s*[\d\.\,%]+)?\s*(?:$|\n)",
+    r"Take\s*Profits?\s*[:\-–—]\s*\$?([\d\.,]+)",
+    r"(?:^|\n)\s*[•\-\u25AA\u25CF\u25E6\u2022\u25AB\u25A0\u25C6\u25C7\u25B8\u25B9\u25B6\u25B7\u279C\u2794\u27A1\u27F6\u27F7\u2799\u279A\u279B\u27A4\u27B3\u27B2\u27BD\u27BE\u27A5\u27A6\u27A7\u27A8\u27A9\u27AB\u27AC\u27AD\u27AE\u27AF\u27B0\u27B1\u27BB\u27BC]?\s*\$?([\d\.,]+)",
 ]
 
 CAPITAL_KEYS = [
@@ -113,51 +124,91 @@ PERIOD_KEYS = [
 
 SPOT_ONLY_KEYS = [r"spot\s*only", r"spot", r"SPOT TRADE", r"فورية"]
 
+
+# ---------- SMART FALLBACK RESOLVER ----------
+def resolve_currency_fallback(text: str, cur: Optional[str]) -> Optional[str]:
+    text_u = text.upper()
+
+    # If parser already found a valid ticker, keep it
+    if cur and cur.upper() != "SPOT":
+        return cur
+
+    # 1️⃣ Search for exact tickers in aliases
+    for name, ticker in TOKEN_ALIASES.items():
+        if ticker in text_u:
+            return ticker
+
+    # 2️⃣ Search for coin names in aliases
+    for name, ticker in TOKEN_ALIASES.items():
+        if name in text_u:
+            return ticker
+
+    # 3️⃣ Search for explicit trading pairs
+    p = re.search(r"([A-Z]{2,10})\s*/\s*([A-Z]{2,10})", text_u)
+    if p:
+        return p.group(1)
+
+    return cur
+
+
 # ---------- Parser ----------
 def parse_signal(text: str) -> Optional[ParsedSignal]:
     emit("parse_debug", {"stage": "start", "preview": text[:120]})
 
-        # -------------------------------
-    #  CURRENCY EXTRACTION (FIXED)
+    # -------------------------------
+    #  CURRENCY EXTRACTION (SAFEST VERSION)
     # -------------------------------
     emit("parse_debug", {"stage": "currency_start", "preview": text[:120]})
 
-    # 1️⃣ Highest-priority rule:
-    # If the signal includes something like "(ZEN)", ALWAYS use it.
+    cur = None
+
+    # 1️⃣ Highest-priority: (TICKER)
     paren = re.search(r"\(([A-Z0-9]{2,10})\)", text)
     if paren:
         cur = paren.group(1)
-    else:
-        # 2️⃣ Try regular "Currency:" / "Coin:" formats
+
+    # 2️⃣ Coin name before Spot/Signal
+    if not cur:
+        name_match = re.search(
+            r"([A-Za-z]{3,20})\s*[—\-–]*\s*(?:Spot|Signal)",
+            text,
+            flags=re.IGNORECASE
+        )
+        if name_match:
+            cur = name_match.group(1)
+
+    # 3️⃣ "Currency:", "Coin:", etc.
+    if not cur:
         cur = _m(text, CURRENCY_KEYS)
 
-        # 3️⃣ Fallback: things like "Solana / Spot Trading"
-        if not cur:
-            cur_line = re.search(r"([A-Za-z]{2,15})\s*/\s*(?:Spot|Trading|Trade|Spot Trading)", text, re.IGNORECASE)
-            if cur_line:
-                cur = cur_line.group(1)
+    # 4️⃣ "Solana Spot"
+    if not cur:
+        m = re.search(r"([A-Za-z]{2,20})\s+(?:Spot|Signal|Trade)", text, re.IGNORECASE)
+        if m:
+            cur = m.group(1)
 
-        # 4️⃣ Fallback: "Solana Spot Signal", "XRP Spot", etc.
-        if not cur:
-            cur_line = re.search(r"([A-Za-z]{2,15})\s+(?:Spot|Signal|Trade)", text, re.IGNORECASE)
-            if cur_line:
-                cur = cur_line.group(1)
+    # 5️⃣ "Solana / Spot Trading"
+    if not cur:
+        m = re.search(r"([A-Za-z]{2,15})\s*/\s*(?:Spot|Trading|Trade|Spot Trading)", text, re.IGNORECASE)
+        if m:
+            cur = m.group(1)
 
-        # 5️⃣ Final fallback: sometimes coin is written bare like "XRP (Spot Trade)"
-        if not cur:
-            cur_line = re.search(r"([A-Z]{2,10})\s*\(?(?:Spot|Trade|Spot Trade)?\)?", text)
-            if cur_line:
-                cur = cur_line.group(1)
+    # 6️⃣ Explicit pair
+    if not cur:
+        m = re.search(r"([A-Z]{2,10}\s*/\s*[A-Z]{2,5})", text)
+        if m:
+            cur = m.group(1)
 
-        # 6️⃣ Last-chance: direct pair "XRP/USDT"
-        if not cur:
-            cur_line = re.search(r"[A-Z]{2,10}\s*/\s*[A-Z]{2,5}", text)
-            if cur_line:
-                cur = cur_line.group(0)
+    # Prevent SPOT being mistaken as currency
+    if cur and cur.upper() == "SPOT":
+        cur = None
+
+    # 7️⃣ SMART FALLBACK
+    cur = resolve_currency_fallback(text, cur)
 
     emit("parse_debug", {"stage": "currency_extracted", "currency": cur})
 
-    # Entry (supports single or range)
+    # --- Entry ---
     entry_match = None
     for pat in ENTRY_KEYS:
         entry_match = re.search(pat, text, re.IGNORECASE)
@@ -171,24 +222,20 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
         else:
             entry = entry_match.group(1)
 
-    # Stop Loss
+    # --- Stop Loss ---
     stop = _m(text, STOP_KEYS)
 
-    # Take Profits
+    # --- Take Profits ---
     tp_values = []
     for pat in TP_KEYS:
         for m in re.finditer(pat, text, re.IGNORECASE | re.MULTILINE):
             try:
                 val = m.group(m.lastindex or 1)
-            except IndexError:
+            except:
                 continue
-            if val:
-                val_norm = val.strip()
-                # Avoid collecting obvious % only or too-short junk
-                if re.search(r"\d", val_norm):
-                    tp_values.append(val_norm)
+            if val and re.search(r"\d", val):
+                tp_values.append(val.strip())
 
-    # Deduplicate while preserving order
     seen = set()
     tp_values = [x for x in tp_values if not (x in seen or seen.add(x))]
 
@@ -202,70 +249,48 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
         "currency": cur,
         "entry": entry,
         "stop": stop,
-        "tp1": tp_values[0] if len(tp_values) > 0 else None,
+        "tp1": tp_values[0] if tp_values else None,
         "tp2": tp_values[1] if len(tp_values) > 1 else None,
         "tp3": tp_values[2] if len(tp_values) > 2 else None,
         "cap": cap,
         "per": per,
     })
 
-    # Sanity check: must have currency + entry
+    # If no currency or entry → fail
     if not (cur and entry):
         return None
 
-    # If NO TP found, set TP1 to +3% above entry and notify
+    # Fallback TP1 if none found
     if len(tp_values) == 0:
         try:
-            e_val = clean_num(entry)
-            fallback_tp = round(e_val * 1.03, 8)
-            emit("parse_notice", {
-                "msg": "No TP detected — applying fallback TP1 = entry * 1.03",
-                "entry": e_val,
-                "tp1": fallback_tp
-            })
-            tp_values = [str(fallback_tp)]
-        except Exception:
-            # if entry couldn’t be parsed to float for some reason — fail silently to keep old behavior
-            pass
+            e = clean_num(entry)
+            tp_values = [str(round(e * 1.03, 8))]
+        except:
+            return None
 
-    # Resolve currency display & hint
     currency_display, symbol_hint = extract_symbol_hint(cur)
     if not symbol_hint and "/" in cur:
         symbol_hint = cur.split("/")[0].strip().upper()
 
     stop_val = clean_num(stop) if stop else None
-    # Build TP set
+
     tp1 = clean_num(tp_values[0]) if len(tp_values) >= 1 else None
     tp2 = clean_num(tp_values[1]) if len(tp_values) >= 2 else None
     tp3 = clean_num(tp_values[2]) if len(tp_values) >= 3 else None
-    
-    # --- Normalize numeric precision to Binance-safe float ---
-    def _normalize_price(v):
-        try:
-            return round(float(v), 6) if v is not None else None
-        except Exception:
-            return None
 
-    stop_val = _normalize_price(stop_val)
-    tp1 = _normalize_price(tp1)
-    tp2 = _normalize_price(tp2)
-    tp3 = _normalize_price(tp3)
+    def _norm(v):
+        try: return round(float(v), 6)
+        except: return None
 
+    stop_val = _norm(stop_val)
+    tp1 = _norm(tp1)
+    tp2 = _norm(tp2)
+    tp3 = _norm(tp3)
 
-    # If still no TP1 for some reason, abort
     if tp1 is None:
         return None
 
     tpset = TPSet(tp1=tp1, tp2=tp2, tp3=tp3)
-
-    emit("parse_success", {
-        "currency": cur,
-        "entry": clean_num(entry),
-        "sl": stop_val,
-        "tp1": tpset.tp1,
-        "tp2": tpset.tp2,
-        "tp3": tpset.tp3,
-    })
 
     return ParsedSignal(
         raw_text=text,
