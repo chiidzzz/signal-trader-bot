@@ -81,6 +81,7 @@ async function loadConfig() {
     }
 
     // Core settings
+    set("machine_name", cfg.machine_name);
     set("dry_run", cfg.dry_run);
     set("quote_asset", cfg.quote_asset);
     set("capital_entry_pct_default", cfg.capital_entry_pct_default);
@@ -111,6 +112,7 @@ cfgForm.onsubmit = async (e) => {
   e.preventDefault();
   const data = {};
   const fields = [
+    "machine_name",
     "dry_run",
     "quote_asset",
     "capital_entry_pct_default",

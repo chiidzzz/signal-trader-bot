@@ -307,7 +307,12 @@ class Notifier:
             
             # Send to cached entity
             print(f"[NOTIFIER] Sending to cached entity...")
-            result = await client.send_message(self._entity_cache, text, parse_mode='markdown')
+            # prepend machine name
+            cfg = read_settings_dict()
+            prefix = cfg.get("machine_name", "").strip()
+            final_text = f"💻 *{prefix}* — {text}" if prefix else text
+
+            result = await client.send_message(self._entity_cache, final_text, parse_mode='markdown')
             print(f"[NOTIFIER] ✅ Message sent successfully! Message ID: {result.id}")
             
         except Exception as e:
@@ -318,7 +323,11 @@ class Notifier:
             # Try fallback without cache
             print(f"[NOTIFIER] Attempting fallback method 1 (direct int)...")
             try:
-                result = await client.send_message(int(self.chat_id), text, parse_mode='markdown')
+                cfg = read_settings_dict()
+                prefix = cfg.get("machine_name", "").strip()
+                final_text = f"💻 *{prefix}* — {text}" if prefix else text
+
+                result = await client.send_message(int(self.chat_id), final_text, parse_mode='markdown')
                 print(f"[NOTIFIER] ✅ Fallback 1 succeeded! Message ID: {result.id}")
             except Exception as e2:
                 print(f"[NOTIFIER ERROR] ❌ Fallback 1 failed: {e2}")
@@ -326,7 +335,11 @@ class Notifier:
                 # Last resort: try as string
                 print(f"[NOTIFIER] Attempting fallback method 2 (string)...")
                 try:
-                    result = await client.send_message(self.chat_id, text, parse_mode='markdown')
+                    cfg = read_settings_dict()
+                    prefix = cfg.get("machine_name", "").strip()
+                    final_text = f"💻 *{prefix}* — {text}" if prefix else text
+
+                    result = await client.send_message(self.chat_id, final_text, parse_mode='markdown')
                     print(f"[NOTIFIER] ✅ Fallback 2 succeeded! Message ID: {result.id}")
                 except Exception as e3:
                     print(f"[NOTIFIER ERROR] ❌ All attempts failed: {e3}")
@@ -801,7 +814,7 @@ async def main():
             if idle > max_idle:
                 await notifier.send(
                     client,
-                    f"⚠️ MSI Laptop No signals received for {int(idle/60)} minutes!"
+                    f"⚠️ No signals received for {int(idle/60)} minutes!"
                 )
                 await log_error(f"⚠️ Heartbeat: no signals for {int(idle/60)} minutes")
 

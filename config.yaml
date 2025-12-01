@@ -1,3 +1,4 @@
+machine_name: MSI LAPTOP
 dry_run: true
 quote_asset: USDC
 capital_entry_pct_default: 0.01
