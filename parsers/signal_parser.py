@@ -51,13 +51,28 @@ def clean_num(val: str) -> float:
 
 
 def extract_symbol_hint(line: str):
+    """
+    Extracts a possible symbol hint written in parentheses, like (BTC/USDT) or (SOL),
+    but safely ignores parentheses from TP/SL lines such as:
+        (TP), (SL), (+1.08%), (TP1), etc.
+    """
     line = line.strip()
+
+    danger_words = ["TP", "TAKE PROFIT", "SL", "STOP LOSS", "SPOT"]
+    if any(w in line.upper() for w in danger_words):
+        return line, None
+
     p = re.search(r"\(([A-Z0-9]+)\)", line)
     if p:
-        return line, p.group(1)
+        token = p.group(1).upper()
+        ignored = {"TP", "SL", "SPOT", "TP1", "TP2", "TP3", "TP4"}
+        if token not in ignored:
+            return line, token
+
     s = re.search(r"([A-Z0-9]{2,})\s*/\s*[A-Z]{3,5}", line)
     if s:
         return line, s.group(1)
+
     return line, None
 
 
@@ -75,14 +90,13 @@ CURRENCY_KEYS = [
     r"Currency\s*[:\-]\s*(.+)",
     r"Coin\s*[:\-]\s*(.+)",
     r"Asset\s*[:\-]\s*(.+)",
+    r"الأصل\s*[:\-]\s*(.+)",
     r"العملة\s*[:\-]\s*(.+)",
     r"Währung\s*[:\-]\s*(.+)",
 ]
 
 ENTRY_KEYS = [
-    r"Entry(?: Price| Zone)?\s*[:\-]\s*\*?\\?\$?([\d\.,]+)\*?(?:\s*[–\-—]\s*\*?\\?\$?([\d\.,]+)\*?)?",
-    r"سعر\s*الدخول\s*[:\-]\s*\*?\\?\$?([\d\.,]+)\*?(?:\s*[–\-—]\s*\*?\\?\$?([\d\.,]+)\*?)?",
-    r"Einstieg(?:szone)?\s*[:\-]\s*\*?\\?\$?([\d\.,]+)\*?(?:\s*[–\-—]\s*\*?\\?\$?([\d\.,]+)\*?)?",
+    r"Entry(?: Price| Zone)?\s*[:\-]\s*\$?([\d\.,]+)",
 ]
 
 STOP_KEYS = [
@@ -92,20 +106,20 @@ STOP_KEYS = [
 ]
 
 TP_KEYS = [
-    r"TP1\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
-    r"TP2\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
-    r"TP3\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
-    r"TP4\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
-    r"Take\s*Profit\s*\(?(TP\d*)?\)?\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
-    r"Target\s*\d*\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
-    r"الهدف\s*\d*\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
-    r"Ziel\s*\d*\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
+    r"TP1\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
+    r"TP2\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
+    r"TP3\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
+    r"TP4\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
+    r"Take\s*Profit\s*\(?(TP\d*)?\)?\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
+    r"Target\s*\d*\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
+    r"الهدف\s*\d*\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
+    r"Ziel\s*\d*\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
 ]
 
 TP_KEYS += [
-    r"Take\s*Profit\s*(?:1|2|3|4)\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
-    r"TP\s*(?:1|2|3|4)\s*(?:[:\-–—→➝>])\s*\$?([\d\.,]+)",
-    r"Take\s*Profits?\s*[:\-–—]\s*\$?([\d\.,]+)",
+    r"Take\s*Profit\s*(?:1|2|3|4)\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
+    r"TP\s*(?:1|2|3|4)\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
+    r"Take\s*Profits?\s*[:\-—–]\s*\$?([\d\.,]+)",
     r"(?:^|\n)\s*[•\-\u25AA\u25CF\u25E6\u2022\u25AB\u25A0\u25C6\u25C7\u25B8\u25B9\u25B6\u25B7\u279C\u2794\u27A1\u27F6\u27F7\u2799\u279A\u279B\u27A4\u27B3\u27B2\u27BD\u27BE\u27A5\u27A6\u27A7\u27A8\u27A9\u27AB\u27AC\u27AD\u27AE\u27AF\u27B0\u27B1\u27BB\u27BC]?\s*\$?([\d\.,]+)",
 ]
 
@@ -127,23 +141,23 @@ SPOT_ONLY_KEYS = [r"spot\s*only", r"spot", r"SPOT TRADE", r"فورية"]
 
 # ---------- SMART FALLBACK RESOLVER ----------
 def resolve_currency_fallback(text: str, cur: Optional[str]) -> Optional[str]:
+    """
+    Currently unused in parse_signal, but kept for compatibility.
+    Uses strict word-boundary alias matching.
+    """
     text_u = text.upper()
 
-    # If parser already found a valid ticker, keep it
     if cur and cur.upper() != "SPOT":
         return cur
 
-    # 1️⃣ Search for exact tickers in aliases
     for name, ticker in TOKEN_ALIASES.items():
-        if ticker in text_u:
+        if len(ticker) <= 2:
+            continue
+        if re.search(rf"\b{name.upper()}\b", text_u):
+            return ticker
+        if re.search(rf"\b{ticker}\b", text_u):
             return ticker
 
-    # 2️⃣ Search for coin names in aliases
-    for name, ticker in TOKEN_ALIASES.items():
-        if name in text_u:
-            return ticker
-
-    # 3️⃣ Search for explicit trading pairs
     p = re.search(r"([A-Z]{2,10})\s*/\s*([A-Z]{2,10})", text_u)
     if p:
         return p.group(1)
@@ -156,59 +170,155 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
     emit("parse_debug", {"stage": "start", "preview": text[:120]})
 
     # -------------------------------
-    #  CURRENCY EXTRACTION (SAFEST VERSION)
+    #  DEFINE CURRENCY ZONE (HEADER BEFORE ENTRY)
     # -------------------------------
-    emit("parse_debug", {"stage": "currency_start", "preview": text[:120]})
+    text_u = text.upper()
+
+    # ONLY the English Entry marks the start of the valid zone
+    # ENGLISH ONLY entry-related keywords
+    entry_keywords = [
+        r"\bENTRY\b",
+        r"\bENTRY\s*PRICE\b",
+        r"\bENTRY\s*ZONE\b",
+        r"\bENTRY\s*RANGE\b",
+        r"\bENTRY\s*TARGET\b",
+        r"\bENTRY\s*LEVEL\b",
+    ]
+
+    # IMPORTANT: search inside uppercased text to find position
+    entry_pos = None
+    for kw in entry_keywords:
+        m = re.search(kw, text_u, re.IGNORECASE)
+        if m:
+            entry_pos = m.start()
+            break   # STOP at the first English match
+
+    if entry_pos is not None:
+        # ENGLISH ENTRY found → valid header
+        currency_zone = text[:entry_pos]
+    else:
+        # IF ENGLISH ENTRY IS MISSING (rare), use only the FIRST 2 lines
+        lines = text.split("\n")
+        currency_zone = "\n".join(lines[:2]) if len(lines) >= 2 else text
+
+    currency_zone_u = currency_zone.upper()
+
+    emit("parse_debug", {
+        "stage": "currency_zone",
+        "entry_pos": entry_pos,
+        "currency_zone_preview": currency_zone[:120],
+    })
+
+    # -------------------------------
+    #  CURRENCY EXTRACTION (SAFE) - ONLY FROM CURRENCY ZONE
+    # -------------------------------
+    emit("parse_debug", {"stage": "currency_start", "preview": currency_zone[:120]})
 
     cur = None
 
-    # 1️⃣ Highest-priority: (TICKER)
-    paren = re.search(r"\(([A-Z0-9]{2,10})\)", text)
-    if paren:
-        cur = paren.group(1)
+    # 1️⃣ explicit trading pairs - SEARCH ONLY IN CURRENCY ZONE
+    pair_match = re.search(r"\b([A-Z0-9]{2,10})\s*/\s*([A-Z0-9]{2,10})\b", currency_zone_u)
+    if pair_match:
+        cur = pair_match.group(1)
+        emit("parse_debug", {"stage": "currency_pair_detected", "currency": cur})
+    else:
+        # 2️⃣ "Coin:" or "Currency:" or "Asset:" fields - SEARCH ONLY IN CURRENCY ZONE
+        coin_field = _m(currency_zone, CURRENCY_KEYS)
+        if coin_field:
+            coin_field = coin_field.strip().upper()
+            
+            # Clean up: remove (SPOT), (FUTURES), etc. from the field
+            coin_field = re.sub(r'\s*\((?:SPOT|FUTURES|PERP|PERPETUAL)\)\s*', '', coin_field)
+            coin_field = coin_field.strip()
 
-    # 2️⃣ Coin name before Spot/Signal
-    if not cur:
-        name_match = re.search(
-            r"([A-Za-z]{3,20})\s*[—\-–]*\s*(?:Spot|Signal)",
-            text,
-            flags=re.IGNORECASE
-        )
-        if name_match:
-            cur = name_match.group(1)
+            for name, ticker in TOKEN_ALIASES.items():
+                if len(ticker) <= 2:
+                    continue
+                if coin_field == name.upper():
+                    cur = ticker
+                    break
+                if coin_field == ticker:
+                    cur = ticker
+                    break
 
-    # 3️⃣ "Currency:", "Coin:", etc.
-    if not cur:
-        cur = _m(text, CURRENCY_KEYS)
+            if not cur:
+                cur = coin_field
 
-    # 4️⃣ "Solana Spot"
-    if not cur:
-        m = re.search(r"([A-Za-z]{2,20})\s+(?:Spot|Signal|Trade)", text, re.IGNORECASE)
-        if m:
-            cur = m.group(1)
+        # 3️⃣ Parentheses extraction - HIGHEST PRIORITY - SEARCH ONLY IN CURRENCY ZONE
+        if not cur:
+            # Look for ticker in parentheses like (ETC) or (BTC)
+            parens = re.findall(r"\(([A-Z0-9]{2,15})\)", currency_zone_u)
+            for token in parens:
+                token = token.upper()
+                if token in {"TP", "SL", "TP1", "TP2", "TP3", "TP4", "SPOT"}:
+                    continue
+                if re.fullmatch(r"\d+(\.\d+)?", token):
+                    continue
 
-    # 5️⃣ "Solana / Spot Trading"
-    if not cur:
-        m = re.search(r"([A-Za-z]{2,15})\s*/\s*(?:Spot|Trading|Trade|Spot Trading)", text, re.IGNORECASE)
-        if m:
-            cur = m.group(1)
+                # If it's a valid ticker (2-10 chars), use it directly
+                if 2 <= len(token) <= 10:
+                    # Check if it's in our known tickers
+                    if token in TOKEN_ALIASES.values():
+                        cur = token
+                        break
+                    # Check if it's an alias
+                    if token in TOKEN_ALIASES:
+                        cur = TOKEN_ALIASES[token]
+                        break
+                    # If it looks like a ticker, accept it (parentheses are strong signal)
+                    cur = token
+                    break
 
-    # 6️⃣ Explicit pair
-    if not cur:
-        m = re.search(r"([A-Z]{2,10}\s*/\s*[A-Z]{2,5})", text)
-        if m:
-            cur = m.group(1)
+        # 4️⃣ SAFE alias scan — **LIMITED TO CURRENCY ZONE**
+        if not cur:
+            # First, look for exact ticker matches (like "ETC" in the text)
+            for name, ticker in TOKEN_ALIASES.items():
+                # Skip tiny tickers (S, H, PE…)
+                if len(ticker) <= 2:
+                    continue
+                    
+                # PRIORITY: Look for the ticker itself (e.g., "ETC")
+                if re.search(rf"\b{ticker}\b", currency_zone_u):
+                    cur = ticker
+                    break
+            
+            # Second, look for full coin names (but only if no ticker found)
+            if not cur:
+                for name, ticker in TOKEN_ALIASES.items():
+                    # Skip tiny tickers (S, H, PE…)
+                    if len(ticker) <= 2:
+                        continue
+                    
+                    # Look for full coin name like "LITECOIN" or "BITCOIN"
+                    # But NOT partial matches like "ETHEREUM" in "ETHEREUM CLASSIC"
+                    if re.search(rf"\b{name.upper()}\b", currency_zone_u):
+                        # Double-check: if we found "ETHEREUM", make sure "CLASSIC" isn't right after
+                        match_pos = currency_zone_u.find(name.upper())
+                        if match_pos != -1:
+                            after_match = currency_zone_u[match_pos + len(name):match_pos + len(name) + 20]
+                            # If we see "CLASSIC", "CASH", "GOLD" after the coin name, skip it
+                            if not re.match(r'\s*(CLASSIC|CASH|GOLD|SV|ABC)', after_match):
+                                cur = ticker
+                                break
 
-    # Prevent SPOT being mistaken as currency
-    if cur and cur.upper() == "SPOT":
-        cur = None
-
-    # 7️⃣ SMART FALLBACK
-    cur = resolve_currency_fallback(text, cur)
+        # 5️⃣ Look for token after "Signal —" or similar patterns in FIRST LINE ONLY
+        if not cur:
+            # Get the actual first line (before first newline)
+            first_line = currency_zone.split("\n")[0].strip()
+            first_line_u = first_line.upper()
+            
+            # Pattern: "Signal — TOKEN" or "Signal - TOKEN"
+            m = re.search(r"SIGNAL\s*[—\-–]\s*([A-Z0-9]{2,10})", first_line_u)
+            if m:
+                token = m.group(1).upper()
+                # Verify it's not a common word
+                if token not in {"HIGH", "MEDIUM", "LOW", "RISK", "SPOT", "THE", "FOR", "AND", "LEVEL"}:
+                    cur = token
+                    emit("parse_debug", {"stage": "currency_from_signal_dash", "currency": cur})
 
     emit("parse_debug", {"stage": "currency_extracted", "currency": cur})
 
-    # --- Entry ---
+    # ------------------ ENTRY - SEARCH IN FULL TEXT ------------------
     entry_match = None
     for pat in ENTRY_KEYS:
         entry_match = re.search(pat, text, re.IGNORECASE)
@@ -222,10 +332,10 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
         else:
             entry = entry_match.group(1)
 
-    # --- Stop Loss ---
+    # Stop Loss - SEARCH IN FULL TEXT
     stop = _m(text, STOP_KEYS)
 
-    # --- Take Profits ---
+    # Take Profits - SEARCH IN FULL TEXT
     tp_values = []
     for pat in TP_KEYS:
         for m in re.finditer(pat, text, re.IGNORECASE | re.MULTILINE):
@@ -239,7 +349,7 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
     seen = set()
     tp_values = [x for x in tp_values if not (x in seen or seen.add(x))]
 
-    # Capital & Period
+    # Capital & Period - SEARCH IN FULL TEXT
     cap = _m(text, CAPITAL_KEYS)
     per = _m(text, PERIOD_KEYS)
     spot_only = any(re.search(k, text, re.IGNORECASE) for k in SPOT_ONLY_KEYS)
@@ -256,11 +366,9 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
         "per": per,
     })
 
-    # If no currency or entry → fail
     if not (cur and entry):
         return None
 
-    # Fallback TP1 if none found
     if len(tp_values) == 0:
         try:
             e = clean_num(entry)
@@ -279,8 +387,10 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
     tp3 = clean_num(tp_values[2]) if len(tp_values) >= 3 else None
 
     def _norm(v):
-        try: return round(float(v), 6)
-        except: return None
+        try:
+            return round(float(v), 6)
+        except:
+            return None
 
     stop_val = _norm(stop_val)
     tp1 = _norm(tp1)

@@ -77,8 +77,8 @@ async def check_internet():
 
 # --- Main watchdog loop ---
 async def monitor():
-    print("🕵️ Watchdog started…")
-    await send_telegram("🟢 Watchdog started and monitoring backend/frontend health")
+    print("🕵️ MSI Laptop Watchdog started…")
+    await send_telegram("🟢 MSI Laptop Watchdog started and monitoring backend/frontend health")
 
     last_state = None  # "ok", "backend_down", "frontend_down", "both_down"
     last_net_state = None  # internet connectivity state
@@ -96,9 +96,9 @@ async def monitor():
             age_b = now - mtime_b
             backend_alive = age_b < STALE_THRESHOLD_BACKEND
             if not backend_alive:
-                print(f"[WATCHDOG] Backend ping stale: {age_b:.1f}s old (threshold: {STALE_THRESHOLD_BACKEND}s)")
+                print(f"[WATCHDOG] MSI Laptop Backend ping stale: {age_b:.1f}s old (threshold: {STALE_THRESHOLD_BACKEND}s)")
         except FileNotFoundError:
-            print(f"[WATCHDOG] Backend ping file not found")
+            print(f"[WATCHDOG] MSI Laptop Backend ping file not found")
             pass
 
         # === Check frontend ping file ===
@@ -107,9 +107,9 @@ async def monitor():
             age_f = now - mtime_f
             frontend_alive = age_f < STALE_THRESHOLD_FRONTEND
             if not frontend_alive:
-                print(f"[WATCHDOG] Frontend ping stale: {age_f:.1f}s old (threshold: {STALE_THRESHOLD_FRONTEND}s)")
+                print(f"[WATCHDOG] MSI Laptop Frontend ping stale: {age_f:.1f}s old (threshold: {STALE_THRESHOLD_FRONTEND}s)")
         except FileNotFoundError:
-            print(f"[WATCHDOG] Frontend ping file not found")
+            print(f"[WATCHDOG] MSI Laptop Frontend ping file not found")
             pass
 
         # === Debounce logic ===
@@ -117,29 +117,29 @@ async def monitor():
             backend_misses += 1
         else:
             if backend_misses > 0:
-                print(f"[WATCHDOG] Backend recovered (was down for {backend_misses} checks)")
+                print(f"[WATCHDOG] MSI Laptop Backend recovered (was down for {backend_misses} checks)")
             backend_misses = 0
 
         if not frontend_alive:
             frontend_misses += 1
         else:
             if frontend_misses > 0:
-                print(f"[WATCHDOG] Frontend recovered (was down for {frontend_misses} checks)")
+                print(f"[WATCHDOG] MSI Laptop Frontend recovered (was down for {frontend_misses} checks)")
             frontend_misses = 0
 
         # === Determine combined state ===
         if backend_misses >= DEBOUNCE_LIMIT and frontend_misses >= DEBOUNCE_LIMIT:
             state = "both_down"
-            msg = f"🚨 Frontend + Backend DOWN at {time.strftime('%H:%M:%S')}"
+            msg = f"🚨 MSI Laptop Frontend + Backend DOWN at {time.strftime('%H:%M:%S')}"
         elif backend_misses >= DEBOUNCE_LIMIT:
             state = "backend_down"
-            msg = f"⚠️ Backend DOWN at {time.strftime('%H:%M:%S')}"
+            msg = f"⚠️ MSI Laptop Backend DOWN at {time.strftime('%H:%M:%S')}"
         elif frontend_misses >= DEBOUNCE_LIMIT:
             state = "frontend_down"
-            msg = f"⚠️ Frontend DOWN at {time.strftime('%H:%M:%S')}"
+            msg = f"⚠️ MSI Laptop Frontend DOWN at {time.strftime('%H:%M:%S')}"
         else:
             state = "ok"
-            msg = f"✅ Frontend + Backend OK at {time.strftime('%H:%M:%S')}"
+            msg = f"✅ MSI Laptop Frontend + Backend OK at {time.strftime('%H:%M:%S')}"
 
         # === Always update status display (no event log spam) ===
         update_status(msg)
@@ -150,15 +150,15 @@ async def monitor():
             if success:
                 last_state = state
             else:
-                print("[WATCHDOG] Telegram failed, will retry next loop")
+                print("[WATCHDOG] MSI Laptop Telegram failed, will retry next loop")
 
 
         # === Network check (Internet/API reachability) ===
         net_ok = await check_internet()
         if net_ok and last_net_state is not True:
-            await send_telegram(f"✅ Internet connection restored at {time.strftime('%H:%M:%S')}")
+            await send_telegram(f"✅ MSI Laptop Internet connection restored at {time.strftime('%H:%M:%S')}")
         elif not net_ok and last_net_state is not False:
-            print(f"[Network] ⚠️ Internet lost at {time.strftime('%H:%M:%S')}")
+            print(f"[Network] ⚠️ MSI Laptop Internet lost at {time.strftime('%H:%M:%S')}")
             # Can't send Telegram here if net is down
         last_net_state = net_ok
 

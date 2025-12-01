@@ -84,6 +84,7 @@ async function loadConfig() {
     set("dry_run", cfg.dry_run);
     set("quote_asset", cfg.quote_asset);
     set("capital_entry_pct_default", cfg.capital_entry_pct_default);
+    set("override_capital_enabled", cfg.override_capital_enabled);
     set("max_slippage_pct", cfg.max_slippage_pct);
     set("use_limit_if_slippage_exceeds", cfg.use_limit_if_slippage_exceeds);
     set("respect_spot_only", cfg.respect_spot_only);
@@ -113,6 +114,7 @@ cfgForm.onsubmit = async (e) => {
     "dry_run",
     "quote_asset",
     "capital_entry_pct_default",
+    "override_capital_enabled",
     "max_slippage_pct",
     "use_limit_if_slippage_exceeds",
     "respect_spot_only",

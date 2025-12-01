@@ -42,7 +42,7 @@ async def main():
     print("=" * 70)
     
     # Get all dialogs (chats, channels, groups)
-    dialogs = await client.get_dialogs()
+    dialogs = await client.get_dialogs(limit=2000)
     
     channels = []
     groups = []
@@ -84,14 +84,14 @@ async def main():
     if users:
         print("\n💬 PRIVATE CHATS:")
         print("-" * 70)
-        for name, chat_id in users[:10]:  # Show first 10 only
+        for name, chat_id in users[:50]:  # Show first 50 only
             print(f"   Name: {name}")
             print(f"   ID:   {chat_id}")
             print(f"   For .env use: TG_NOTIFY_CHAT_ID={chat_id}")
             print()
         
         if len(users) > 10:
-            print(f"   ... and {len(users) - 10} more private chats")
+            print(f"   ... and {len(users) - 50} more private chats")
     
     print("=" * 70)
     print("\n💡 TIPS:")

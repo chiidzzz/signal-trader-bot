@@ -119,6 +119,7 @@ class Settings(BaseModel):
     use_testnet: bool = False
     quote_asset: str = "USDT"
     capital_entry_pct_default: float = 0.80
+    override_capital_enabled: bool = False
     max_slippage_pct: float = 0.015
     use_limit_if_slippage_exceeds: bool = True
     tp_splits: Dict[str, float] = Field(default_factory=lambda: {"tp1": 0.5, "tp2": 0.3, "runner": 0.2})
@@ -434,19 +435,34 @@ class Trader:
         self._recent_signals.append((symbol_clean, entry_price, now))
 
         # === Balance and sizing ===
-        free_q = 100.0 if s.dry_run else self.x.fetch_free_quote(symbol.split("/")[1])
-        cap_pct = sig.capital_pct or s.capital_entry_pct_default
+        # Extract quote token (example: XRP/USDC → USDC)
+        quote_token = symbol.split("/")[1]
+
+        # Fetch REAL balance even in dry-run
+        free_q = self.x.fetch_free_quote(quote_token)
+
+        # --- Capital Entry Override Logic ---
+        if s.override_capital_enabled:
+            cap_pct = s.capital_entry_pct_default
+        else:
+            cap_pct = sig.capital_pct if sig.capital_pct is not None else s.capital_entry_pct_default
+
         spend = free_q * cap_pct
-        if spend < s.min_notional_usdt:
+
+        # Minimum notional check  
+        # In dry_run we do NOT skip it — we show simulation even if balance is low  
+        if not s.dry_run and spend < s.min_notional_usdt:
             emit("skip", {"msg": f"Not enough quote: {free_q:.2f} to spend {spend:.2f}"})
             await self.n.send(self.tg, f"⚠️ Not enough quote balance")
             return
 
+        # Fetch price & size
         last = self.x.fetch_price(symbol)
         acceptable = abs(last - sig.entry) / sig.entry <= s.max_slippage_pct
         amt_step, _ = self.x.lot_step_info(symbol)
         px_for_size = last if acceptable or not s.use_limit_if_slippage_exceeds else sig.entry
         amount = round_amt(spend / px_for_size, amt_step)
+
         if amount <= 0:
             emit("error", {"msg": "Computed amount zero"})
             await self.n.send(self.tg, "❌ Computed amount is zero")
@@ -456,6 +472,20 @@ class Trader:
         is_live = not s.dry_run
         is_testnet = getattr(s, "use_testnet", False)
         mode_label = "testnet" if (is_live and is_testnet) else "mainnet" if is_live else "sim"
+        # 💥 DRY RUN = SIMULATION MODE (uses REAL BALANCE, but NO BUY)
+        if s.dry_run:
+            await self.n.send(
+                self.tg,
+                f"🧪 *SIMULATION ONLY — No order placed*\n"
+                f"Pair: `{symbol}`\n"
+                f"Balance: `{free_q:.4f}` {quote_token}\n"
+                f"Capital %: `{cap_pct*100:.2f}%`\n"
+                f"Spend: `{spend:.4f}` {quote_token}\n"
+                f"Price: `{last:.6f}`\n"
+                f"Amount: `{amount}` {symbol.split('/')[0]}\n"
+            )
+            emit("debug", {"msg": "STOP BEFORE BUY — SIMULATION MODE"})
+            return
 
         try:
             if is_live:
@@ -771,7 +801,7 @@ async def main():
             if idle > max_idle:
                 await notifier.send(
                     client,
-                    f"⚠️ No signals received for {int(idle/60)} minutes!"
+                    f"⚠️ MSI Laptop No signals received for {int(idle/60)} minutes!"
                 )
                 await log_error(f"⚠️ Heartbeat: no signals for {int(idle/60)} minutes")
 

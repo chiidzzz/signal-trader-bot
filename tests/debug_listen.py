@@ -1,22 +1,52 @@
-# tests/debug_listen.py
+#!/usr/bin/env python3
+"""
+Real-time listener to capture ANY Telegram chat_id
+Send a message in the target group and it will show the ID instantly.
+"""
+
 import os
+import sys
+import asyncio
+from pathlib import Path
+
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
 
 load_dotenv()
 
-api_id = int(os.getenv("TG_API_ID"))
-api_hash = os.getenv("TG_API_HASH")
-session = "signals_session"
-channel_id = int(os.getenv("TG_CHANNEL_ID_OR_USERNAME"))
+API_ID = int(os.getenv("TG_API_ID"))
+API_HASH = os.getenv("TG_API_HASH")
 
-client = TelegramClient(session, api_id, api_hash)
+if not API_ID or not API_HASH:
+    print("❌ TG_API_ID / TG_API_HASH missing from .env")
+    sys.exit(1)
 
-@client.on(events.NewMessage(chats=channel_id))
-async def handler(event):
-    chat = await event.get_chat()
-    print(f"[DEBUG] Message from {getattr(chat, 'title', chat)} ({chat.id}): {event.raw_text[:120]!r}")
+async def main():
+    print("🔐 Connecting to Telegram...")
 
-print("✅ Listening for messages...  Send something in your group.")
-client.start()
-client.run_until_disconnected()
+    client = TelegramClient("chat_id_listener_session", API_ID, API_HASH)
+    await client.start()
+    print("✅ Connected!")
+    print("📡 Listening for any message you send...")
+
+    @client.on(events.NewMessage)
+    async def handler(event):
+        chat = await event.get_chat()
+        chat_id = event.chat_id
+
+        print("\n=======================================")
+        print("📍 MESSAGE RECEIVED")
+        print("---------------------------------------")
+        print(f"Chat Title : {getattr(chat, 'title', None)}")
+        print(f"Chat ID    : {chat_id}")
+        print("---------------------------------------")
+        print("💡 Use this in your .env:")
+        print(f"TG_NOTIFY_CHAT_ID={chat_id}")
+        print("=======================================\n")
+
+    print("💬 Now go send a message in your Telegram group (e.g., chadi-tester)")
+    print("   Leave this window running...")
+    await client.run_until_disconnected()
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -1,6 +1,7 @@
-dry_run: false
+dry_run: true
 quote_asset: USDC
-capital_entry_pct_default: 0.5
+capital_entry_pct_default: 0.01
+override_capital_enabled: false
 max_slippage_pct: 0.015
 use_limit_if_slippage_exceeds: true
 respect_spot_only: true
