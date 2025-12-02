@@ -96,7 +96,11 @@ CURRENCY_KEYS = [
 ]
 
 ENTRY_KEYS = [
-    r"Entry(?: Price| Zone)?\s*[:\-]\s*\$?([\d\.,]+)",
+    # RANGE with optional *, optional backslash before $
+    r"Entry(?: Price| Zone| Range)?\s*[:\-]\s*\*?\\?\$?([\d\.,]+)\s*[~\-–—]\s*\*?\\?\$?([\d\.,]+)\*?",
+
+    # Single value with optional *, optional backslash before $
+    r"Entry(?: Price| Zone| Range)?\s*[:\-]\s*\*?\\?\$?([\d\.,]+)\*?",
 ]
 
 STOP_KEYS = [
@@ -106,21 +110,23 @@ STOP_KEYS = [
 ]
 
 TP_KEYS = [
-    r"TP1\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
-    r"TP2\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
-    r"TP3\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
-    r"TP4\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
-    r"Take\s*Profit\s*\(?(TP\d*)?\)?\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
-    r"Target\s*\d*\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
-    r"الهدف\s*\d*\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
-    r"Ziel\s*\d*\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
+    r"TP1\s*(?:[:\-—–→➔>])\s*\*?\\?\$?([\d\.,]+)\*?",
+    r"TP2\s*(?:[:\-—–→➔>])\s*\*?\\?\$?([\d\.,]+)\*?",
+    r"TP3\s*(?:[:\-—–→➔>])\s*\*?\\?\$?([\d\.,]+)\*?",
+    r"TP4\s*(?:[:\-—–→➔>])\s*\*?\\?\$?([\d\.,]+)\*?",
+    r"Take\s*Profit\s*\(?(TP\d*)?\)?\s*(?:[:\-—–→➔>])\s*\\?\$?([\d\.,]+)",
+    r"Target\s*\d*\s*(?:[:\-—–→➔>])\s*\\?\$?([\d\.,]+)",
+    r"الهدف\s*\d*\s*(?:[:\-—–→➔>])\s*\\?\$?([\d\.,]+)",
+    r"Ziel\s*\d*\s*(?:[:\-—–→➔>])\s*\\?\$?([\d\.,]+)",
 ]
 
 TP_KEYS += [
-    r"Take\s*Profit\s*(?:1|2|3|4)\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
-    r"TP\s*(?:1|2|3|4)\s*(?:[:\-—–→➔>])\s*\$?([\d\.,]+)",
-    r"Take\s*Profits?\s*[:\-—–]\s*\$?([\d\.,]+)",
-    r"(?:^|\n)\s*[•\-\u25AA\u25CF\u25E6\u2022\u25AB\u25A0\u25C6\u25C7\u25B8\u25B9\u25B6\u25B7\u279C\u2794\u27A1\u27F6\u27F7\u2799\u279A\u279B\u27A4\u27B3\u27B2\u27BD\u27BE\u27A5\u27A6\u27A7\u27A8\u27A9\u27AB\u27AC\u27AD\u27AE\u27AF\u27B0\u27B1\u27BB\u27BC]?\s*\$?([\d\.,]+)",
+    r"Take\s*Profit\s*(?:1|2|3|4)\s*(?:[:\-—–→➔>])\s*\\?\$?([\d\.,]+)",
+    r"TP\s*(?:1|2|3|4)\s*(?:[:\-—–→➔>])\s*\\?\$?([\d\.,]+)",
+    r"Take\s*Profits?\s*[:\-—–]\s*\\?\$?([\d\.,]+)",
+    r"(?:^|\n)\s*[•\-\u25AA\u25CF\u25E6\u2022\u25AB\u25A0\u25C6\u25C7\u25B8\u25B9\u25B6\u25B7"
+    r"\u279C\u2794\u27A1\u27F6\u27F7\u2799\u279A\u279B\u27A4\u27B3\u27B2\u27BD\u27BE\u27A5"
+    r"\u27A6\u27A7\u27A8\u27A9\u27AB\u27AC\u27AD\u27AE\u27AF\u27B0\u27B1\u27BB\u27BC]?\s*\\?\$?([\d\.,]+)",
 ]
 
 CAPITAL_KEYS = [
@@ -215,6 +221,16 @@ def parse_signal(text: str) -> Optional[ParsedSignal]:
     emit("parse_debug", {"stage": "currency_start", "preview": currency_zone[:120]})
 
     cur = None
+
+    # 0️⃣ NEW — Detect formats like:  "🔥 SUI (Spot Trade) 🔥"
+    m = re.search(
+        r"\b([A-Z0-9]{2,15})\s*\(\s*(?:SPOT|SPOT TRADE)\s*\)",
+        currency_zone,
+        flags=re.IGNORECASE
+    )
+    if m:
+        cur = m.group(1).upper()
+        emit("parse_debug", {"stage": "currency_from_spot_parentheses", "currency": cur})
 
     # 1️⃣ explicit trading pairs - SEARCH ONLY IN CURRENCY ZONE
     pair_match = re.search(r"\b([A-Z0-9]{2,10})\s*/\s*([A-Z0-9]{2,10})\b", currency_zone_u)
