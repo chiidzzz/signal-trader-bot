@@ -5,6 +5,8 @@ import httpx
 import json
 import yaml
 from dotenv import load_dotenv
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
 
 # --- Load environment variables (.env must contain TG_BOT_TOKEN + TG_NOTIFY_CHAT_ID) ---
 load_dotenv()
@@ -19,6 +21,9 @@ CHECK_INTERVAL = 10
 STALE_THRESHOLD_BACKEND = 45
 STALE_THRESHOLD_FRONTEND = 90
 DEBOUNCE_LIMIT = 3
+
+# --- Binance check ---
+BINANCE_CHECK_INTERVAL = 15 * 60  # every 15 minutes
 
 # --- Telegram ---
 TOKEN = os.getenv("TG_BOT_TOKEN")
@@ -39,7 +44,7 @@ def update_status(msg: str):
     status = {
         "ts": int(time.time()),
         "msg": msg,
-        "is_down": any(x in msg for x in ["DOWN", "🚨", "⚠️"])
+        "is_down": any(x in msg for x in ["DOWN", "🚨", "⚠️", "BLOCKED"])
     }
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
         json.dump(status, f, ensure_ascii=False, indent=2)
@@ -85,6 +90,32 @@ async def check_internet():
                 continue
     return False
 
+# --- NEW: Check Binance AUTH (signed endpoint) ---
+async def check_binance_auth():
+    """
+    Returns:
+      (True, "OK") if Binance signed endpoint is reachable (auth/IP OK)
+      (False, reason_str) otherwise
+    """
+    key = os.getenv("BINANCE_API_KEY")
+    secret = os.getenv("BINANCE_API_SECRET")
+
+    if not key or not secret:
+        return False, "Missing BINANCE_API_KEY/BINANCE_API_SECRET in .env"
+
+    try:
+        c = Client(key, secret)
+        # Signed endpoint -> will fail on IP restriction (-2015)
+        c.get_account()
+        return True, "OK"
+    except BinanceAPIException as e:
+        # The exact issue you reported: -2015 Invalid API-key, IP, or permissions
+        if getattr(e, "code", None) == -2015:
+            return False, f"Binance blocked (IP/API permission): {e.message}"
+        return False, f"Binance API exception ({getattr(e,'code',None)}): {str(e)}"
+    except Exception as e:
+        return False, f"Binance unexpected error: {e}"
+
 # --- Main watchdog ---
 async def monitor():
     name = get_machine_name()
@@ -93,6 +124,11 @@ async def monitor():
 
     last_state = None
     last_net_state = None
+
+    # --- NEW: Binance state tracking ---
+    last_binance_state = None
+    last_binance_check = 0
+
     backend_misses = 0
     frontend_misses = 0
 
@@ -154,6 +190,28 @@ async def monitor():
             print(f"[Network] ⚠️ {name} Internet lost at {time.strftime('%H:%M:%S')}")
 
         last_net_state = net_ok
+
+        # --- NEW: Binance auth/IP check (every 15 minutes) ---
+        if time.time() - last_binance_check >= BINANCE_CHECK_INTERVAL:
+            last_binance_check = time.time()
+            bin_ok, bin_reason = await check_binance_auth()
+
+            if bin_ok:
+                # Send ONLY once when it comes back (no OK spam)
+                if last_binance_state is not True:
+                    await send_telegram("✅ Binance API access restored (IP authorized)")
+                update_status(f"{name}: ✅ Binance API OK")
+                last_binance_state = True
+            else:
+                # Send EVERY 15 minutes while blocked (your preference)
+                await send_telegram(
+                    "🚨 Binance API BLOCKED!\n"
+                    "IP changed or not whitelisted.\n"
+                    f"Reason: {bin_reason}\n"
+                    "⚠️ Trading will FAIL until fixed."
+                )
+                update_status(f"{name}: 🚨 Binance API BLOCKED (IP issue)")
+                last_binance_state = False
 
         await asyncio.sleep(CHECK_INTERVAL)
 
