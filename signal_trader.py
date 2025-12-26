@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 import ccxt
 import csv, datetime, traceback, aiofiles
-from live_trade_executor import place_bracket_atomic, place_oco, _fmt, _get_tick_and_step, _get_symbol_info, _get_tick_and_step
+from live_trade_executor import place_bracket_atomic, place_oco, _fmt, _get_tick_and_step
 from binance.client import Client
 import time
 import math
@@ -472,6 +472,20 @@ class Trader:
         # Fetch price & size
         last = self.x.fetch_price(symbol)
         acceptable = abs(last - sig.entry) / sig.entry <= s.max_slippage_pct
+
+        # --- If slippage exceeded: either LIMIT entry (wait/cancel) or SKIP ---
+        if (not acceptable) and (not s.use_limit_if_slippage_exceeds):
+            await self.n.send(
+                self.tg,
+                f"⏸️ Skipped trade (slippage too high)\n"
+                f"Pair: `{symbol}`\n"
+                f"Signal entry: `${float(sig.entry):.6f}`\n"
+                f"Market: `${last:.6f}`\n"
+                f"Max slippage: `{s.max_slippage_pct*100:.2f}%`"
+            )
+            emit("skip_slippage", {"symbol": symbol, "entry": float(sig.entry), "market": last})
+            return
+
         amt_step, _ = self.x.lot_step_info(symbol)
         px_for_size = last if acceptable or not s.use_limit_if_slippage_exceeds else sig.entry
         amount = round_amt(spend / px_for_size, amt_step)
@@ -511,28 +525,90 @@ class Trader:
                     # Step 2: Determine if we should skip initial OCO
                     use_override_direct = getattr(s, "override_tp_enabled", False) or getattr(s, "override_sl_enabled", False)
 
-                    if use_override_direct:
-                        emit("info", {"msg": "Override mode enabled → skipping initial OCO, will use override OCO directly"})
-                        # just do a market buy, no OCO
-                        from live_trade_executor import execute_market_buy
-                        filled_qty, actual_fill_price = execute_market_buy(symbol, spend)
+                    # If slippage exceeded AND limit-entry enabled -> do LIMIT entry, wait TIF, cancel if not filled
+                    if (not acceptable) and s.use_limit_if_slippage_exceeds:
+                        import asyncio
+                        import functools
+                        from live_trade_executor import execute_limit_buy
+
+                        tif = int(s.limit_time_in_force_sec)
+                        loop = asyncio.get_running_loop()
+
+                        # 🔔 Notify immediately when LIMIT is placed (thread-safe)
+                        def notify_limit_placed(order_id):
+                            loop.call_soon_threadsafe(
+                                asyncio.create_task,
+                                self.n.send(
+                                    self.tg,
+                                    (
+                                        f"🟡 LIMIT order placed\n"
+                                        f"Pair: `{symbol}`\n"
+                                        f"Limit: `${float(sig.entry):.6f}`\n"
+                                        f"TIF: `{tif}s`\n"
+                                        f"OrderId: `{order_id}`"
+                                    ),
+                                ),
+                            )
+
+                        fn = functools.partial(
+                            execute_limit_buy,
+                            symbol=symbol,
+                            usd_amount=spend,
+                            limit_price=float(sig.entry),
+                            tif_sec=tif,
+                            on_placed=notify_limit_placed,
+                        )
+
+                        filled_qty, actual_fill_price, limit_oid = await asyncio.to_thread(fn)
+
+                        # ⏸️ LIMIT not filled → canceled
+                        if not filled_qty:
+                            await self.n.send(
+                                self.tg,
+                                (
+                                    f"⏸️ LIMIT order canceled (not filled)\n"
+                                    f"Pair: `{symbol}`\n"
+                                    f"Limit: `${float(sig.entry):.6f}`\n"
+                                    f"Waited: `{tif}s`\n"
+                                    f"OrderId: `{limit_oid}`"
+                                ),
+                            )
+                            emit("limit_cancel", {"symbol": symbol, "order_id": limit_oid, "tif": tif})
+                            return
+
+                        # LIMIT filled → continue flow (OCO will be placed later)
                         res = {
-                            "filled_qty": filled_qty,
-                            "avg_price": actual_fill_price,
-                            "tp": initial_tp,
-                            "sl_trigger": initial_sl,
+                            "filled_qty": float(filled_qty),
+                            "avg_price": float(actual_fill_price),
+                            "tp": float(sig.tps.tp1),
+                            "sl_trigger": float(sig.stop),
+                            "sl_limit": None,
                             "oco_id": None,
                         }
                     else:
-                        # normal full bracket (market + OCO)
-                        res = place_bracket_atomic(
-                            symbol=symbol,
-                            spend_usd=spend,
-                            entry_hint=float(sig.entry),
-                            tp_price=initial_tp,
-                            sl_trigger=initial_sl,
-                        )
-
+                        # Normal behavior (acceptable slippage): keep your original flow
+                        if use_override_direct:
+                            emit("info", {"msg": "Override mode enabled → skipping initial OCO, will use override OCO directly"})
+                            from live_trade_executor import execute_market_buy
+                            filled_qty, actual_fill_price = execute_market_buy(symbol, spend)
+                            res = {
+                                "filled_qty": filled_qty,
+                                "avg_price": actual_fill_price,
+                                "tp": float(sig.tps.tp1),
+                                "sl_trigger": float(sig.stop),
+                                "sl_limit": None,
+                                "oco_id": None,
+                            }
+                        else:
+                            # normal full bracket (market + OCO)
+                            res = place_bracket_atomic(
+                                symbol=symbol,
+                                spend_usd=spend,
+                                entry_hint=float(sig.entry),
+                                tp_price=float(sig.tps.tp1),
+                                sl_trigger=float(sig.stop),
+                            )
+                            
                     # Step 3: Get ACTUAL fill price and quantity
                     actual_fill_price = float(res['avg_price'])
                     filled_qty = float(res['filled_qty'])
@@ -671,30 +747,55 @@ class Trader:
                             "oco_id": new_oco_id
                         })
                     else:
-                        # No override — original OCO already in place
+                        # --- FIX: if we entered via LIMIT, no OCO exists yet ---
+                        if (not acceptable) and s.use_limit_if_slippage_exceeds and (res.get("oco_id") is None):
+                            from live_trade_executor import place_oco_after_fill
+
+                            oco_res = place_oco_after_fill(
+                                symbol=symbol,
+                                filled_qty=float(filled_qty),
+                                fill_price=float(actual_fill_price),
+                                tp_price=float(res["tp"]),
+                                sl_trigger=float(res["sl_trigger"]),
+                            )
+
+                            res["oco_id"] = oco_res.get("oco_id")
+                            res["sl_limit"] = oco_res.get("sl_limit")
+
+                        # Safe SL limit formatting (avoid crash if None)
+                        sl_lim = res.get("sl_limit")
+                        sl_lim_txt = f"{float(sl_lim):.6f}" if sl_lim is not None else "N/A"
+
+                        # No override — original OCO already in place (or just placed above)
                         await self.n.send(
                             self.tg,
                             (
                                 f"✅ BUY filled {filled_qty:.8f} {symbol} @ ${actual_fill_price:.6f} ({mode_label})\n"
-                                f"🎯 OCO set → TP ${res['tp']:.6f}, SL ${res['sl_trigger']:.6f}/${res['sl_limit']:.6f}\n"
+                                f"🎯 OCO set → TP ${float(res['tp']):.6f}, SL ${float(res['sl_trigger']):.6f}/{sl_lim_txt}\n"
                                 f"🆔 OCO ID: {res['oco_id']}"
                             ),
                         )
-                        emit("oco_placed", {
-                            "symbol": symbol,
-                            "fill_price": actual_fill_price,
-                            "filled_qty": filled_qty,
-                            "tp": res["tp"],
-                            "sl": res["sl_trigger"],
-                            "oco_id": res["oco_id"]
-                        })
+                        emit(
+                            "oco_placed",
+                            {
+                                "symbol": symbol,
+                                "fill_price": actual_fill_price,
+                                "filled_qty": filled_qty,
+                                "tp": res["tp"],
+                                "sl": res["sl_trigger"],
+                                "oco_id": res["oco_id"],
+                            },
+                        )
                         # Track the OCO for monitoring
                         track_oco(symbol, res["oco_id"], actual_fill_price)
-                        emit("oco_tracked", {
-                            "symbol": symbol,
-                            "oco_id": res["oco_id"],
-                            "msg": f"OCO tracked (ID {res['oco_id']}) for {symbol}"
-                        })
+                        emit(
+                            "oco_tracked",
+                            {
+                                "symbol": symbol,
+                                "oco_id": res["oco_id"],
+                                "msg": f"OCO tracked (ID {res['oco_id']}) for {symbol}",
+                            },
+                        )
 
                 except Exception as e:
                     await self.n.send(self.tg, f"❌ Trade execution failed: {e}")

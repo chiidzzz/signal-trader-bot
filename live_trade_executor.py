@@ -7,6 +7,9 @@ from binance.exceptions import BinanceAPIException
 load_dotenv()
 api_key = os.getenv("BINANCE_API_KEY")
 api_secret = os.getenv("BINANCE_API_SECRET")
+if not api_key or not api_secret:
+    raise RuntimeError("Missing BINANCE_API_KEY / BINANCE_API_SECRET in .env")
+
 client = Client(api_key, api_secret)
 BASE_URL = "https://api.binance.com"
 
@@ -151,6 +154,150 @@ def execute_market_buy(symbol, usd_amount):
         time.sleep(1)
 
     raise RuntimeError("Market order not filled in time")
+
+# === Limit buy (prepared entry) ==========================================
+def execute_limit_buy(symbol, usd_amount, limit_price, tif_sec, on_placed=None):
+    """
+    Place LIMIT BUY at limit_price, wait up to tif_sec for fill.
+    If not filled -> cancel and return (None, None, orderId)
+
+    Returns:
+        tuple: (filled_qty or None, avg_fill_price or None, order_id)
+    """
+    sym_clean = symbol.replace("/", "")
+
+    tick, step = _get_tick_and_step(sym_clean)
+
+    # Quantize limit price and qty to Binance filters
+    limit_px = _round_tick(float(limit_price), tick)
+    qty = float(usd_amount) / limit_px
+    qty = _round_step(qty, step)
+
+    qty_str = _fmt(qty)
+    px_str = _fmt(limit_px)
+
+    print(f"[LIMIT BUY] Placing LIMIT BUY {sym_clean} qty={qty_str} @ {px_str} (tif={tif_sec}s)")
+
+    order = client.order_limit_buy(
+        symbol=sym_clean,
+        quantity=qty_str,
+        price=px_str,
+        timeInForce="GTC",
+    )
+
+    oid = order["orderId"]
+
+    # 🔔 Notify immediately that LIMIT was placed
+    if on_placed:
+        try:
+            on_placed(oid)
+        except Exception:
+            pass
+
+    deadline = time.time() + float(tif_sec)
+
+    # poll until filled or timeout
+    while time.time() < deadline:
+        o = client.get_order(symbol=sym_clean, orderId=oid)
+        st = o.get("status")
+        if st == "FILLED":
+            filled_qty = float(o["executedQty"])
+            avg_fill = float(o["cummulativeQuoteQty"]) / filled_qty
+            print(f"[LIMIT BUY] FILLED qty={filled_qty} avg={avg_fill}")
+            return filled_qty, avg_fill, oid
+
+        if st in ("CANCELED", "REJECTED", "EXPIRED"):
+            print(f"[LIMIT BUY] ended early status={st}")
+            return None, None, oid
+
+        time.sleep(1)
+
+    # not filled in time -> cancel
+    try:
+        client.cancel_order(symbol=sym_clean, orderId=oid)
+        print(f"[LIMIT BUY] CANCELED (timeout) orderId={oid}")
+    except Exception as e:
+        print(f"[LIMIT BUY] cancel failed: {e}")
+
+    return None, None, oid
+
+
+# === OCO after a non-market entry =======================================
+def place_oco_after_fill(
+    symbol,
+    filled_qty,
+    fill_price,
+    tp_price,
+    sl_trigger,
+    sl_limit_offset_frac=0.001,
+    verify_timeout_sec=5,
+):
+    """
+    Place OCO (TP+SL) AFTER you already have a filled position (e.g., from LIMIT buy).
+    Returns dict: filled_qty, avg_price, tp, sl_trigger, sl_limit, oco_id
+    """
+    sym = symbol.replace("/", "")
+    tick, step = _get_tick_and_step(sym)
+
+    sl_limit = float(sl_trigger) * (1 - float(sl_limit_offset_frac))
+
+    tp_r = _round_tick(float(tp_price), tick)
+    sl_tr_r = _round_tick(float(sl_trigger), tick)
+    sl_lim_r = _round_tick(float(sl_limit), tick)
+
+    # Validate relation: TP > Fill > SL
+    if not (tp_r > float(fill_price) > sl_tr_r):
+        raise RuntimeError(
+            f"Invalid OCO price relation:\n"
+            f"  TP: {tp_r} | Fill: {fill_price} | SL: {sl_tr_r}\n"
+            f"  Required: TP > Fill > SL"
+        )
+
+    if sl_lim_r >= sl_tr_r:
+        sl_lim_r = _round_tick(sl_tr_r - tick, tick)
+
+    # Balance wait + safe qty (copied from place_bracket_atomic logic)
+    base_asset = sym.replace("USDC", "").replace("USDT", "").replace("/", "").upper()
+
+    max_wait_s = 30.0
+    waited = 0.0
+    free_balance = 0.0
+    locked_balance = 0.0
+
+    while waited < max_wait_s:
+        bal = client.get_asset_balance(asset=base_asset) or {}
+        free_balance = float(bal.get("free", 0) or 0.0)
+        locked_balance = float(bal.get("locked", 0) or 0.0)
+        total = free_balance + locked_balance
+        print(f"[BALANCE WAIT] {base_asset} free={free_balance:.8f} locked={locked_balance:.8f} total={total:.8f} need≈{filled_qty:.8f}")
+        if total >= float(filled_qty) * 0.95:
+            break
+        time.sleep(2.0)
+        waited += 2.0
+
+    safe_qty = _round_step(min(free_balance, float(filled_qty)) * 0.999, step)
+    if safe_qty < step:
+        raise RuntimeError(f"After rounding, tradable amount is dust (safe_qty={safe_qty} < step={step})")
+
+    qty_str = _fmt(safe_qty)
+
+    # Place OCO
+    oco = place_oco(symbol, "SELL", qty_str, str(tp_r), str(sl_tr_r), str(sl_lim_r))
+    oco_id = oco.get("orderListId")
+    if not oco_id:
+        raise RuntimeError("OCO response missing orderListId")
+
+    # Verify OCO (best effort)
+    verify_oco(oco_id, verify_timeout_sec)
+
+    return {
+        "filled_qty": safe_qty,
+        "avg_price": float(fill_price),
+        "tp": tp_r,
+        "sl_trigger": sl_tr_r,
+        "sl_limit": sl_lim_r,
+        "oco_id": oco_id,
+    }
 
 # === Emergency flatten ===================================================
 def market_sell(symbol, qty):
