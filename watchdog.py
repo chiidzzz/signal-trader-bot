@@ -147,14 +147,25 @@ async def monitor():
         except FileNotFoundError:
             print(f"[WATCHDOG] {name} Backend ping file not found")
 
-        # --- Frontend ping ---
+        # --- Frontend ping: only alert if UI was active recently ---
+        FRONTEND_ACTIVE_WINDOW = 5 * 60      # if UI pinged within last 5 min => UI is considered "in use"
+        FRONTEND_STALE_ALERT = 30            # if UI is "in use" but stops pinging for 30s => alert
+
         try:
             age_f = now - os.path.getmtime(FRONTEND_PING)
-            frontend_alive = age_f < STALE_THRESHOLD_FRONTEND
-            if not frontend_alive:
-                print(f"[WATCHDOG] {name} Frontend ping stale: {age_f:.1f}s old")
+
+            if age_f > FRONTEND_ACTIVE_WINDOW:
+                # UI is not being used (browser closed) -> treat as OK and stay quiet
+                frontend_alive = True
+            else:
+                # UI was active recently -> now it must keep pinging
+                frontend_alive = age_f < FRONTEND_STALE_ALERT
+                if not frontend_alive:
+                    print(f"[WATCHDOG] {name} Frontend ping stale: {age_f:.1f}s old")
+
         except FileNotFoundError:
-            print(f"[WATCHDOG] {name} Frontend ping file not found")
+            # UI never opened -> don't alert
+            frontend_alive = True
 
         # --- Debouncing ---
         backend_misses = backend_misses + 1 if not backend_alive else 0

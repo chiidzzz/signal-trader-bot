@@ -1,0 +1,16 @@
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+*.log
+.env
+runtime
+*.session*
+signals_session.session
+.vscode
+.idea
+.DS_Store
+Thumbs.db
