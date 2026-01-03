@@ -169,3 +169,58 @@ button:hover {
   font-size: 15px;
   color: #ccc;
 }
+
+@media (max-width: 480px) {
+  body {
+    font-size: 14px;
+  }
+
+  header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .header-left {
+    position: static;
+  }
+
+  .status-center {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  main.grid {
+    grid-template-columns: 1fr !important;
+    padding: 12px;
+    gap: 12px;
+  }
+
+  section {
+    min-height: unset;
+  }
+
+  .row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  input[type="text"],
+  input[type="number"] {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .actions button {
+    width: 100%;
+  }
+
+  .events {
+    height: 50vh;
+  }
+}
