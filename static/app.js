@@ -105,6 +105,42 @@ async function loadConfig() {
   }
 }
 
+// Fetch and display Telegram configuration
+async function loadTelegramConfig() {
+  try {
+    const res = await fetch("/api/telegram-config");
+    const data = await res.json();
+
+    // Source (Listening)
+    const sourceNameEl = document.getElementById("tg-source-name");
+    const sourceIdEl = document.getElementById("tg-source-id");
+
+    if (sourceNameEl && data.source) {
+      sourceNameEl.textContent = data.source.name || "Unknown";
+    }
+    if (sourceIdEl && data.source) {
+      sourceIdEl.textContent = `ID: ${data.source.id}`;
+    }
+
+    // Destination (Sending)
+    const destNameEl = document.getElementById("tg-dest-name");
+    const destIdEl = document.getElementById("tg-dest-id");
+
+    if (destNameEl && data.destination) {
+      destNameEl.textContent = data.destination.name || "Unknown";
+    }
+    if (destIdEl && data.destination) {
+      destIdEl.textContent = `ID: ${data.destination.id}`;
+    }
+  } catch (err) {
+    console.error("Failed to load Telegram config:", err);
+    const sourceNameEl = document.getElementById("tg-source-name");
+    const destNameEl = document.getElementById("tg-dest-name");
+    if (sourceNameEl) sourceNameEl.textContent = "Error loading";
+    if (destNameEl) destNameEl.textContent = "Error loading";
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Save Config
 // -----------------------------------------------------------------------------
@@ -181,3 +217,4 @@ setInterval(async () => {
 }, 5000); // every 5s (more frequent = more reliable detection)
 
 loadConfig();
+loadTelegramConfig();

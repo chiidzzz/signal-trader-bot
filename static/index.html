@@ -10,177 +10,161 @@
 </head>
 
 <body>
+
+    <!-- ================= HEADER ================= -->
     <header>
         <div class="header-left">
             <h1>📈 Signals Bot Dashboard</h1>
         </div>
+
         <div id="status-area" class="status-center">
             <span id="status-dot" class="dot gray" title="disconnected"></span>
             <span id="status-text" class="status-text">Awaiting status...</span>
         </div>
     </header>
 
+    <!-- ================= MAIN ================= -->
     <main class="grid" style="grid-template-columns: 2fr 2fr;">
+
+        <!-- ----------- EVENTS ----------- -->
         <section>
             <h2>Live Events</h2>
             <div id="events" class="events"></div>
         </section>
 
+        <!-- ----------- SETTINGS ----------- -->
         <section>
             <h2>Settings</h2>
+
+            <!-- TELEGRAM CONFIG (READ-ONLY) -->
+            <div class="card" style="
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white;
+          padding: 16px;
+          border-radius: 10px;
+          margin-bottom: 16px;
+        ">
+                <h3 style="margin-top: 0;">📱 Telegram Configuration</h3>
+
+                <div style="
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 10px;
+          ">
+                    <div style="background: rgba(255,255,255,0.15); padding: 12px; border-radius: 8px;">
+                        <div style="font-size: 12px; opacity: 0.9;">📥 Listening To</div>
+                        <div id="tg-source-name" style="font-weight: bold;">Loading…</div>
+                        <div id="tg-source-id" style="font-family: monospace; font-size: 12px;">-</div>
+                    </div>
+
+                    <div style="background: rgba(255,255,255,0.15); padding: 12px; border-radius: 8px;">
+                        <div style="font-size: 12px; opacity: 0.9;">📤 Sending To</div>
+                        <div id="tg-dest-name" style="font-weight: bold;">Loading…</div>
+                        <div id="tg-dest-id" style="font-family: monospace; font-size: 12px;">-</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CONFIG FORM -->
             <form id="cfgForm">
+
                 <div class="row">
-                    <label>Machine Name
-                        <span class="help"
-                            title="This name will appear before every Telegram message so you know which computer sent it.">❓</span>
-                    </label>
+                    <label>Machine Name</label>
                     <input type="text" name="machine_name" />
                 </div>
 
                 <div class="row">
-                    <label>Dry Run
-                        <span class="help"
-                            title="If enabled, no real trades are sent to Binance — all actions are simulated.">❓</span>
-                    </label>
+                    <label>Dry Run</label>
                     <input type="checkbox" name="dry_run" />
                 </div>
 
                 <div class="row">
-                    <label>Quote Asset
-                        <span class="help" title="Currency to trade against (e.g., USDT or USDC).">❓</span>
-                    </label>
+                    <label>Quote Asset</label>
                     <input type="text" name="quote_asset" value="USDC" />
                 </div>
 
                 <div class="row">
-                    <label>Capital Entry % (default)
-                        <span class="help" title="Fraction of available balance used per trade (0.8 = 80%).">❓</span>
-                    </label>
-                    <input type="number" step="0.01" min="0" max="1" name="capital_entry_pct_default" value="0.8" />
+                    <label>Capital Entry %</label>
+                    <input type="number" step="0.01" min="0" max="1" name="capital_entry_pct_default" />
                 </div>
 
                 <fieldset>
                     <legend>Capital Entry Override</legend>
-
                     <div class="row">
-                        <label>Override Signal Capital Entry %
-                            <span class="help"
-                                title="If ON, ignore the % coming from the signal and use your default capital entry %.">
-                                ❓
-                            </span>
-                        </label>
+                        <label>Override Enabled</label>
                         <input type="checkbox" name="override_capital_enabled" />
                     </div>
                 </fieldset>
 
                 <div class="row">
-                    <label>Max Slippage %
-                        <span class="help"
-                            title="Allowed price difference between signal entry and live market. Above this, bot uses a limit order.">❓</span>
-                    </label>
-                    <input type="number" step="0.0001" min="0" max="1" name="max_slippage_pct" value="0.015" />
+                    <label>Max Slippage %</label>
+                    <input type="number" step="0.0001" min="0" max="1" name="max_slippage_pct" />
                 </div>
 
                 <div class="row">
-                    <label>Use Limit if Slippage Exceeds
-                        <span class="help"
-                            title="If checked, places a limit order when slippage exceeds allowed % instead of a market order.">❓</span>
-                    </label>
-                    <input type="checkbox" name="use_limit_if_slippage_exceeds" checked />
+                    <label>Use Limit if Slippage Exceeds</label>
+                    <input type="checkbox" name="use_limit_if_slippage_exceeds" />
                 </div>
 
                 <fieldset>
                     <legend>Guards</legend>
                     <div class="row">
-                        <label>Spot Only
-                            <span class="help"
-                                title="If checked, bot trades only spot pairs, ignoring futures signals.">❓</span>
-                        </label>
-                        <input type="checkbox" name="respect_spot_only" checked />
+                        <label>Spot Only</label>
+                        <input type="checkbox" name="respect_spot_only" />
                     </div>
-                    <div class="row">
-                        <label>Min Notional (USDC)
-                            <span class="help" title="Minimum allowed order size (usually 5 USDT).">❓</span>
-                        </label>
-                        <input type="number" step="0.01" min="0" name="min_notional_usdt" value="5" />
-                    </div>
-                    <div class="row">
-                        <label>Limit TIF (sec)
-                            <span class="help" title="How long a limit order waits before being canceled.">❓</span>
-                        </label>
-                        <input type="number" step="1" min="10" name="limit_time_in_force_sec" value="180" />
-                    </div>
-                </fieldset>
 
-                <fieldset>
-                    <legend>Symbol Resolution</legend>
                     <div class="row">
-                        <label>Prefer (TICKER) in name
-                            <span class="help"
-                                title="When parsing signals, prefer symbols written in parentheses like (SOL/USDT).">❓</span>
-                        </label>
-                        <input type="checkbox" name="prefer_symbol_in_parentheses" checked />
+                        <label>Min Notional</label>
+                        <input type="number" step="0.01" min="0" name="min_notional_usdt" />
                     </div>
+
                     <div class="row">
-                        <label>Fallback fuzzy name search
-                            <span class="help"
-                                title="Try to match token names loosely if an exact market pair is not found.">❓</span>
-                        </label>
-                        <input type="checkbox" name="fallback_to_name_search" checked />
+                        <label>Limit TIF (sec)</label>
+                        <input type="number" step="1" min="10" name="limit_time_in_force_sec" />
                     </div>
                 </fieldset>
 
                 <fieldset>
                     <legend>TP / SL Overrides</legend>
+
                     <div class="row">
-                        <label>Override TP Enabled
-                            <span class="help"
-                                title="If checked, ignore signal TP and use a fixed % above entry.">❓</span>
-                        </label>
+                        <label>Override TP</label>
                         <input type="checkbox" name="override_tp_enabled" />
                     </div>
+
                     <div class="row">
-                        <label>Override TP % (fraction)
-                            <span class="help" title="Set your custom take-profit percentage (0.03 = +3%).">❓</span>
-                        </label>
-                        <input type="number" step="0.0001" min="0" max="1" name="override_tp_pct" value="0.03" />
+                        <label>Override TP %</label>
+                        <input type="number" step="0.0001" min="0" max="1" name="override_tp_pct" />
                     </div>
+
                     <div class="row">
-                        <label>Override SL Enabled
-                            <span class="help"
-                                title="If checked, ignore signal SL and use a fixed % below entry.">❓</span>
-                        </label>
+                        <label>Override SL</label>
                         <input type="checkbox" name="override_sl_enabled" />
                     </div>
+
                     <div class="row">
-                        <label>Override SL % (fraction)
-                            <span class="help" title="Set your custom stop-loss percentage (0.01 = -1%).">❓</span>
-                        </label>
-                        <input type="number" step="0.0001" min="0" max="1" name="override_sl_pct" value="0.01" />
+                        <label>Override SL %</label>
+                        <input type="number" step="0.0001" min="0" max="1" name="override_sl_pct" />
                     </div>
+
                     <div class="row">
-                        <label>Use Fixed Price Difference for SL
-                            <span class="help"
-                                title="If enabled, the stop-loss is set by subtracting a fixed price amount from entry (entry − value) instead of using a percentage.">❓</span>
-                        </label>
+                        <label>SL Absolute</label>
                         <input type="checkbox" name="override_sl_as_absolute" />
                     </div>
                 </fieldset>
 
                 <fieldset>
                     <legend>Safety Watchdogs</legend>
+
                     <div class="row">
-                        <label>Flatten Check Interval (minutes)
-                            <span class="help" title="How often the bot checks open orders for missing SL/TP.">❓</span>
-                        </label>
-                        <input type="number" step="1" min="1" name="flatten_check_interval_min" value="10" />
+                        <label>Flatten Interval (min)</label>
+                        <input type="number" step="1" min="1" name="flatten_check_interval_min" />
                     </div>
+
                     <div class="row">
-                        <label>Heartbeat Idle Limit (minutes)
-                            <span class="help"
-                                title="How long the bot can go without receiving signals before sending an alert.">❓</span>
-                        </label>
-                        <input type="number" step="1" min="1" name="heartbeat_max_idle_min" value="30" />
+                        <label>Heartbeat Idle Limit (min)</label>
+                        <input type="number" step="1" min="1" name="heartbeat_max_idle_min" />
                     </div>
                 </fieldset>
 
@@ -188,11 +172,14 @@
                     <button type="submit">Save Config</button>
                     <span id="saveInfo" class="muted"></span>
                 </div>
+
             </form>
         </section>
     </main>
 
+    <!-- ================= JS ================= -->
     <script src="/static/app.js"></script>
+
 </body>
 
 </html>

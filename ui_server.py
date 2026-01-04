@@ -95,6 +95,35 @@ async def ping():
     return JSONResponse({"ok": True, "ts": time.time()})
 
 
+
+@app.get("/api/telegram-config")
+def get_telegram_config():
+    """Return Telegram configuration from environment variables and cached entity info."""
+    source_id = os.getenv("TG_CHANNEL_ID_OR_USERNAME", "Not configured")
+    dest_id = os.getenv("TG_NOTIFY_CHAT_ID", "Not configured")
+
+    # Try to load cached entity names from runtime
+    entity_cache_file = os.path.join(RUNTIME_DIR, "telegram_entities.json")
+    entity_names = {}
+
+    try:
+        if os.path.exists(entity_cache_file):
+            with open(entity_cache_file, "r", encoding="utf-8") as f:
+                entity_names = json.load(f)
+    except Exception as e:
+        print(f"⚠️ Could not load entity cache: {e}")
+
+    return JSONResponse({
+        "source": {
+            "id": source_id,
+            "name": entity_names.get("source", "Unknown")
+        },
+        "destination": {
+            "id": dest_id,
+            "name": entity_names.get("destination", "Unknown")
+        }
+    })
+
 # -------------------- SSE (status + Telegram alerts) --------------------
 @app.get("/events")
 async def events(request: Request):

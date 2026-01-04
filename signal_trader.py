@@ -820,6 +820,47 @@ class Trader:
             emit("error", {"msg": f"Order placement failed: {e}"})
             await self.n.send(self.tg, f"❌ Order placement failed: {e}")
 
+# Cache entity names for UI display
+async def cache_telegram_entities(client, source_id, dest_id, notifier=None):
+    """Cache Telegram entity names to runtime folder for UI display."""
+    entity_cache = {}
+    
+    try:
+        # Get source entity name
+        try:
+            source_entity = await client.get_entity(source_id if isinstance(source_id, int) else source_id)
+            entity_cache["source"] = getattr(source_entity, 'title', getattr(source_entity, 'username', str(source_id)))
+        except Exception as e:
+            print(f"⚠️ Could not fetch source entity name: {e}")
+            entity_cache["source"] = str(source_id)
+        
+        # Get destination entity name - use notifier's cached entity
+        try:
+            print(f"🔍 DEBUG: notifier={notifier}, has entity_cache={hasattr(notifier, 'entity_cache') if notifier else 'N/A'}, value={getattr(notifier, 'entity_cache', None) if notifier else 'N/A'}")
+            if notifier and hasattr(notifier, '_entity_cache') and notifier._entity_cache:
+                # Reuse the entity that notifier already fetched
+                dest_entity = notifier._entity_cache
+                entity_cache["destination"] = getattr(dest_entity, 'title', getattr(dest_entity, 'username', str(dest_id)))
+                print(f"✅ Destination entity cached from notifier: {entity_cache['destination']}")
+            else:
+                # Try to fetch directly as fallback
+                dest_entity = await client.get_entity(dest_id if isinstance(dest_id, int) else dest_id)
+                entity_cache["destination"] = getattr(dest_entity, 'title', getattr(dest_entity, 'username', str(dest_id)))
+                print(f"✅ Destination entity cached: {entity_cache['destination']}")
+        except Exception as e:
+            print(f"⚠️ Could not fetch destination entity name: {e}")
+            entity_cache["destination"] = str(dest_id)
+        
+        # Save to file
+        cache_file = os.path.join(RUNTIME_DIR, "telegram_entities.json")
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(entity_cache, f, ensure_ascii=False, indent=2)
+        
+        print(f"✅ Cached Telegram entities: {entity_cache}")
+    except Exception as e:
+        print(f"⚠️ Failed to cache Telegram entities: {e}")
+
+
 # --- Main loop ---
 async def main():
     load_dotenv()
@@ -864,7 +905,14 @@ async def main():
 
     print("✅ Telegram client started successfully.")
 
-    notifier = Notifier(notify_chat)
+    notifier = Notifier(notify_chat)        
+    # Send startup message to cache destination entity
+    try:
+        await notifier.send(client, "✅ Bot connected and ready!")
+        print("✅ Sent startup message to destination chat")
+    except Exception as e:
+        print(f"⚠️ Could not send startup message: {e}")
+
     cfg = read_settings()
     binance = BinanceSpot(
         os.environ["BINANCE_API_KEY"],
@@ -876,6 +924,8 @@ async def main():
     binance.prefer_usdc = (cfg.quote_asset.upper() == "USDC")
     trader = Trader(binance, client, notifier)
 
+    # Cache entity names for UI
+    await cache_telegram_entities(client, channel_to_listen, notify_chat, notifier)
     # --- SAFETY TASKS: STOP-GAP FLATTEN AUDIT ---
     async def audit_positions_loop():
         interval = float(read_settings_dict().get("flatten_check_interval_min", 10)) * 60
