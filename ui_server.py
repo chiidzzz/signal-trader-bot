@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 from dotenv import load_dotenv
+import subprocess
 
 
 # --- load .env automatically ---
@@ -123,6 +124,40 @@ def get_telegram_config():
             "name": entity_names.get("destination", "Unknown")
         }
     })
+
+@app.get("/api/bot-heartbeat")
+def bot_heartbeat():
+    path = os.path.join(RUNTIME_DIR, "backend.ping")
+    if not os.path.exists(path):
+        return JSONResponse({"ok": False, "reason": "backend.ping missing"})
+    age = time.time() - os.path.getmtime(path)
+    return JSONResponse({
+        "ok": age < 45,          # matches watchdog threshold
+        "age_sec": round(age, 2)
+    })
+
+@app.api_route("/api/binance-test", methods=["GET", "POST"])
+def run_binance_test():
+    # hard-timeout so it never hangs the API
+    cmd = ["python3", "tests/test_binance_live.py"]
+    try:
+        p = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            cwd=os.getcwd(),
+        )
+        return JSONResponse({
+            "ok": p.returncode == 0,
+            "returncode": p.returncode,
+            "stdout": p.stdout[-4000:],  # trim
+            "stderr": p.stderr[-4000:],  # trim
+        })
+    except subprocess.TimeoutExpired:
+        return JSONResponse({"ok": False, "error": "timeout"}, status_code=504)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 # -------------------- SSE (status + Telegram alerts) --------------------
 @app.get("/events")
