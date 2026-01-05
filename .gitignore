@@ -16,6 +16,7 @@ __pycache__/
 runtime/
 events.jsonl
 state.json
+config.yaml
 
 # IDE / OS files
 .vscode/

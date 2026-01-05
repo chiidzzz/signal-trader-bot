@@ -12,13 +12,15 @@ from live_trade_executor import place_bracket_atomic, place_oco, _fmt, _get_tick
 from binance.client import Client
 import time
 import math
+from parsers.signal_parser import parse_signal, ParsedSignal, TPSet
+from parsers.ai_signal_parser import AISignalParser
 
 last_signal_ts = time.time()
 
 # --- Local utils ---
 RUNTIME_DIR = "runtime"
 EVENTS_FILE = os.path.join(RUNTIME_DIR, "events.jsonl")
-STATE_FILE = os.path.join(RUNTIME_DIR, "state.json")
+STATE_FILE = os.path.join(RUNTIME_DIR, "state.json")    
 CONFIG_FILE = "config.yaml"
 ALIASES_FILE = "token_aliases.json"
 os.makedirs(RUNTIME_DIR, exist_ok=True)
@@ -920,9 +922,15 @@ async def main():
         cfg.dry_run,
         cfg.use_testnet
     )
-
     binance.prefer_usdc = (cfg.quote_asset.upper() == "USDC")
     trader = Trader(binance, client, notifier)
+    # Initialize AI parser
+    try:
+        ai_parser = AISignalParser()
+        print("AI PARSER: Initialized successfully with Groq")
+    except Exception as e:
+        ai_parser = None
+        print(f"AI PARSER: Failed to initialize - {e}")
 
     # Cache entity names for UI
     await cache_telegram_entities(client, channel_to_listen, notify_chat, notifier)
@@ -994,20 +1002,54 @@ async def main():
 
         print(f"[✅ HANDLER] Message received, length: {len(text)} chars")
 
-        # FIXED: More permissive regex - match any of these keywords
-        if not re.search(r'signal|إشارة|spot|coin|entry', text, flags=re.IGNORECASE):
-            print(f"[⏭️ SKIP] No keyword found in: {text[:100]!r}")
-            emit("ignored", {"reason": "no_keyword", "preview": text[:100]})
-            return
+        # Check for obvious signal keywords
+        has_keywords = re.search(r'signal|إشارة|spot|coin|entry|buy|sell|trade', text, flags=re.IGNORECASE)
+        
+        if not has_keywords:
+            print("[⚠️ NO KEYWORDS] Trying AI parser anyway...")
+            # Try AI parser directly since no keywords found
+            if ai_parser is not None:
+                start_time = time.time()
+                sig = ai_parser.parse(text)
+                parse_time = (time.time() - start_time) * 1000
+                print(f"[🤖 AI PARSE] Completed in {parse_time:.0f}ms - {'SUCCESS' if sig else 'FAILED'}")
+                
+                if sig:
+                    # AI successfully parsed it - continue to trade execution
+                    print(f"[✅ PARSED BY AI] {sig.currency_display} @ {sig.entry}")
+                    emit("ai_parse_success", {"currency": sig.currency_display, "entry": sig.entry})
+                else:
+                    print("[⏭️ SKIP] AI also couldn't parse this message")
+                    emit("ignored", {"reason": "no_keywords_and_ai_failed", "preview": text[:100]})
+                    return
+            else:
+                print("[⏭️ SKIP] No keywords and AI parser not available")
+                emit("ignored", {"reason": "no_keyword", "preview": text[:100]})
+                return
+        else:
+            print("[✅ KEYWORD] Found signal keyword!")
+            emit("new_message", {"preview": text[:120]})
 
-        print(f"[✅ KEYWORD] Found signal keyword!")
-        emit("new_message", {"preview": text[:120]})
-
+        # Try regex parser first (fast)
         from parsers.signal_parser import parse_signal
+        start_time = time.time()
         sig = parse_signal(text)
+        parse_time = (time.time() - start_time) * 1000
+        print(f"[🔍 REGEX PARSE] Completed in {parse_time:.0f}ms - {'SUCCESS' if sig else 'FAILED'}")
+
+        # If regex fails, try AI parser as fallback
+        if not sig and ai_parser is not None:
+            print("[🤖 AI PARSE] Attempting with Groq...")
+            start_time = time.time()
+            sig = ai_parser.parse(text)
+            parse_time = (time.time() - start_time) * 1000
+            print(f"[🤖 AI PARSE] Completed in {parse_time:.0f}ms - {'SUCCESS' if sig else 'FAILED'}")
+            
+            if sig:
+                emit("ai_parse_success", {"currency": sig.currency_display, "entry": sig.entry})
         
         if not sig:
-            print(f"[❌ PARSE] Failed to parse signal")
+            print("[❌ PARSE] Both regex and AI parsing failed")
             emit("ignored", {"reason": "parse_failed", "msg": f"Ignored unparseable signal: {text[:80]}..."})
             return
 
