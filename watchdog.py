@@ -20,7 +20,7 @@ STATUS_FILE = os.path.join(RUNTIME_DIR, "status.json")
 CHECK_INTERVAL = 10
 STALE_THRESHOLD_BACKEND = 45
 STALE_THRESHOLD_FRONTEND = 90
-DEBOUNCE_LIMIT = 3
+DEBOUNCE_LIMIT = 5
 
 # --- Binance check ---
 BINANCE_CHECK_INTERVAL = 15 * 60  # every 15 minutes
@@ -122,7 +122,7 @@ async def monitor():
     print(f"🕵️ {name} Watchdog started…")
     await send_telegram("🟢 Watchdog started and monitoring backend/frontend health")
 
-    last_state = None
+    laststate = None
     last_net_state = None
 
     # --- NEW: Binance state tracking ---
@@ -147,51 +147,49 @@ async def monitor():
         except FileNotFoundError:
             print(f"[WATCHDOG] {name} Backend ping file not found")
 
-        # --- Frontend ping: only alert if UI was active recently ---
-        FRONTEND_ACTIVE_WINDOW = 5 * 60      # if UI pinged within last 5 min => UI is considered "in use"
-        FRONTEND_STALE_ALERT = 30            # if UI is "in use" but stops pinging for 30s => alert
-
+        # --- Frontend ping: only alert on state CHANGES (open/close) ---
+        FRONTEND_ACTIVE_WINDOW = 10 * 60  # UI considered "in use" if pinged within 10 min
+        
         try:
             age_f = now - os.path.getmtime(FRONTEND_PING)
-
-            if age_f > FRONTEND_ACTIVE_WINDOW:
-                # UI is not being used (browser closed) -> treat as OK and stay quiet
+            if age_f <= FRONTEND_ACTIVE_WINDOW:
+                # UI is actively being used
                 frontend_alive = True
             else:
-                # UI was active recently -> now it must keep pinging
-                frontend_alive = age_f < FRONTEND_STALE_ALERT
-                if not frontend_alive:
-                    print(f"[WATCHDOG] {name} Frontend ping stale: {age_f:.1f}s old")
-
+                # UI hasn't pinged in 10+ minutes - consider it closed
+                frontend_alive = False
         except FileNotFoundError:
-            # UI never opened -> don't alert
-            frontend_alive = True
-
-        # --- Debouncing ---
+            # UI never opened
+            frontend_alive = False
+        
+        # Debouncing - no change needed, just track state
         backend_misses = backend_misses + 1 if not backend_alive else 0
-        frontend_misses = frontend_misses + 1 if not frontend_alive else 0
-
-        # --- Determine state ---
-        if backend_misses >= DEBOUNCE_LIMIT and frontend_misses >= DEBOUNCE_LIMIT:
-            state = "both_down"
-            msg = f"🚨 Frontend + Backend DOWN at {time.strftime('%H:%M:%S')}"
-        elif backend_misses >= DEBOUNCE_LIMIT:
+        
+        # --- Determine state and alert ONLY on changes ---
+        if backend_misses >= DEBOUNCE_LIMIT:
             state = "backend_down"
             msg = f"⚠️ Backend DOWN at {time.strftime('%H:%M:%S')}"
-        elif frontend_misses >= DEBOUNCE_LIMIT:
-            state = "frontend_down"
-            msg = f"⚠️ Frontend DOWN at {time.strftime('%H:%M:%S')}"
         else:
-            state = "ok"
-            msg = f"✅ Frontend + Backend OK at {time.strftime('%H:%M:%S')}"
-
-        # --- Update UI status ---
-        update_status(f"{name}: {msg}")
-
-        # --- Send Telegram only on state changes ---
-        if state != last_state:
+            state = "backend_ok"
+            msg = f"✅ Backend OK at {time.strftime('%H:%M:%S')}"
+        
+        # Add frontend state to message
+        if frontend_alive:
+            frontend_state = "ui_open"
+            msg = msg.replace("Backend", "Backend (UI open)")
+        else:
+            frontend_state = "ui_closed"
+            msg = msg.replace("Backend", "Backend (UI closed)")
+        
+        # Combine states for comparison
+        current_state = f"{state}_{frontend_state}"
+        
+        update_status(f"{name} — {msg}")
+        
+        # Send Telegram ONLY when state changes
+        if current_state != laststate:
             await send_telegram(msg)
-            last_state = state
+            laststate = current_state
 
         # --- Internet check ---
         net_ok = await check_internet()
