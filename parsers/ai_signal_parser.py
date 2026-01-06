@@ -18,30 +18,35 @@ class AISignalParser:
         Returns ParsedSignal or None if parsing fails
         """
         try:
-            prompt = f"""Extract trading signal information from this message and return ONLY valid JSON.
+            prompt = f"""Analyze this message and determine if it contains a REAL trading signal with specific buy/sell instructions.
 
-IMPORTANT: Identify the correct cryptocurrency ticker symbol. For example:
-- "Optimism" or "Optimisim" = OP (not OPT)
-- "Polkadot" = DOT
-- Use the actual ticker symbol traded on major exchanges like Binance.
+If this is NOT a trading signal (just news, commentary, analysis, price movements), return: {{"is_signal": false}}
+
+If this IS a trading signal with clear entry/exit prices, extract the data.
+
+IMPORTANT: Only parse messages that explicitly tell you to BUY or SELL at specific prices.
+DO NOT create trading signals from:
+- Market news or price drop announcements
+- Liquidation reports
+- General market commentary
+- Price predictions without clear buy instructions
 
 Required JSON format:
 {{
-  "coin_pair": "string (ticker/USDC, e.g., OP/USDC, DOT/USDC, BTC/USDC)",
+  "is_signal": boolean (true only if explicit buy/sell instruction exists),
+  "coin_pair": "string (ticker/USDC, e.g., BTC/USDC)",
   "entry_price": number,
   "stop_loss": number or null,
   "tp1": number or null,
   "tp2": number or null,
   "tp3": number or null,
-  "capital_allocation": number (as decimal, e.g., 1.0 for 100%, 0.5 for 50%),
+  "capital_allocation": number or null,
   "time_horizon_days": number or null,
   "spot_only": boolean
 }}
 
 Message:
-{text}
-
-Return ONLY the JSON object with the CORRECT ticker symbol, no explanations."""
+{text}"""
 
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -62,7 +67,12 @@ Return ONLY the JSON object with the CORRECT ticker symbol, no explanations."""
             
             # Parse response
             result = json.loads(response.choices[0].message.content)
-            
+
+            # Check if it's actually a signal
+            if not result.get("is_signal", False):
+                print("AI determined this is NOT a trading signal")
+                return None
+
             # Convert to ParsedSignal format
             return self._convert_to_parsed_signal(text, result)
             
