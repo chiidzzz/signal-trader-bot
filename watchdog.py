@@ -15,16 +15,20 @@ load_dotenv()
 RUNTIME_DIR = "runtime"
 BACKEND_PING = os.path.join(RUNTIME_DIR, "backend.ping")
 FRONTEND_PING = os.path.join(RUNTIME_DIR, "frontend.ping")
+UI_SERVER_PING = os.path.join(RUNTIME_DIR, "ui_server.ping")
+UI_SERVER_ACTIVE_WINDOW_SEC = 20  # ui_server.ping fresh within 20s => ui_server alive
 STATUS_FILE = os.path.join(RUNTIME_DIR, "status.json")
-
 CHECK_INTERVAL = 10
 STALE_THRESHOLD_BACKEND = 45
 STALE_THRESHOLD_FRONTEND = 90
 DEBOUNCE_LIMIT = 5
-
+# UI open/close detection (to avoid refresh spam)
+UI_ACTIVE_WINDOW_SEC = 60   # UI considered open if frontend.ping updated within last 90s
+UI_MIN_OPEN_SEC = 30        # only send "UI closed" if UI was open >= 30s
+UI_CLOSE_DEBOUNCE = 3          # require 3 consecutive "misses" before declaring closed
+UI_OPEN_DEBOUNCE  = 1          # require 1 consecutive "hits" before declaring opened
 # --- Binance check ---
 BINANCE_CHECK_INTERVAL = 15 * 60  # every 15 minutes
-
 # --- Telegram ---
 TOKEN = os.getenv("TG_BOT_TOKEN")
 CHAT_ID = os.getenv("TG_NOTIFY_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
@@ -122,21 +126,21 @@ async def monitor():
     print(f"🕵️ {name} Watchdog started…")
     await send_telegram("🟢 Watchdog started and monitoring backend/frontend health")
 
-    laststate = None
     last_net_state = None
-
-    # --- NEW: Binance state tracking ---
+    last_backend_state = None
+    last_ui_state = False
+    last_ui_server_state = None  # "up" or "down"
+    ui_open_since = None
     last_binance_state = None
     last_binance_check = 0
-
     backend_misses = 0
-    frontend_misses = 0
+    ui_misses = 0
+    ui_hits = 0
 
     while True:
         name = get_machine_name()  # reload live if user changes it
         now = time.time()
         backend_alive = False
-        frontend_alive = False
 
         # --- Backend ping ---
         try:
@@ -146,21 +150,6 @@ async def monitor():
                 print(f"[WATCHDOG] {name} Backend ping stale: {age_b:.1f}s old")
         except FileNotFoundError:
             print(f"[WATCHDOG] {name} Backend ping file not found")
-
-        # --- Frontend ping: only alert on state CHANGES (open/close) ---
-        FRONTEND_ACTIVE_WINDOW = 10 * 60  # UI considered "in use" if pinged within 10 min
-        
-        try:
-            age_f = now - os.path.getmtime(FRONTEND_PING)
-            if age_f <= FRONTEND_ACTIVE_WINDOW:
-                # UI is actively being used
-                frontend_alive = True
-            else:
-                # UI hasn't pinged in 10+ minutes - consider it closed
-                frontend_alive = False
-        except FileNotFoundError:
-            # UI never opened
-            frontend_alive = False
         
         # Debouncing - no change needed, just track state
         backend_misses = backend_misses + 1 if not backend_alive else 0
@@ -168,28 +157,85 @@ async def monitor():
         # --- Determine state and alert ONLY on changes ---
         if backend_misses >= DEBOUNCE_LIMIT:
             state = "backend_down"
-            msg = f"⚠️ Backend DOWN at {time.strftime('%H:%M:%S')}"
+            msg = f"❌⛔🚨 Backend DOWN at {time.strftime('%H:%M:%S')}"
         else:
             state = "backend_ok"
             msg = f"✅ Backend OK at {time.strftime('%H:%M:%S')}"
         
-        # Add frontend state to message
-        if frontend_alive:
-            frontend_state = "ui_open"
-            msg = msg.replace("Backend", "Backend (UI open)")
+        # --- UI SERVER up/down (separate from browser session) ---
+        try:
+            age_us = now - os.path.getmtime(UI_SERVER_PING)
+            ui_server_alive = age_us <= UI_SERVER_ACTIVE_WINDOW_SEC
+        except FileNotFoundError:
+            ui_server_alive = False
+
+        ui_server_state = "up" if ui_server_alive else "down"
+        if ui_server_state != last_ui_server_state:
+            if ui_server_alive:
+                await send_telegram(f"🟢 UI server UP at {time.strftime('%H:%M:%S')}")
+            else:
+                await send_telegram(f"🔴 UI server DOWN at {time.strftime('%H:%M:%S')}")
+            last_ui_server_state = ui_server_state
+
+        # --- UI open/close (Telegram) with debounce ---
+                # If ui_server is down, don't emit UI opened/closed (not a browser event)
+        if not ui_server_alive:
+            ui_hits = 0
+            ui_misses = 0
+            await asyncio.sleep(CHECK_INTERVAL)
+            continue
+        try:
+            age_f = now - os.path.getmtime(FRONTEND_PING)
+            frontend_alive_now = age_f <= UI_ACTIVE_WINDOW_SEC
+            print(f"[WATCHDOG] UI age_f={age_f:.1f}s alive_now={frontend_alive_now} hits={ui_hits} misses={ui_misses}")
+        except FileNotFoundError:
+            frontend_alive_now = False
+
+        if frontend_alive_now:
+            ui_hits += 1
+            ui_misses = 0
         else:
-            frontend_state = "ui_closed"
-            msg = msg.replace("Backend", "Backend (UI closed)")
-        
-        # Combine states for comparison
-        current_state = f"{state}_{frontend_state}"
-        
+            ui_misses += 1
+            ui_hits = 0
+
+        # OPEN transition (debounced)
+        if (not last_ui_state) and ui_hits >= UI_OPEN_DEBOUNCE:
+            last_ui_state = True
+            ui_open_since = now
+            await send_telegram(f"🟢 UI opened at {time.strftime('%H:%M:%S')}")
+
+        # CLOSE transition (debounced)
+        if last_ui_state and ui_misses >= UI_CLOSE_DEBOUNCE:
+            last_ui_state = False
+            open_dur = (now - ui_open_since) if ui_open_since else 0
+            if open_dur >= UI_MIN_OPEN_SEC:
+                await send_telegram(
+                    f"🟡 UI closed at {time.strftime('%H:%M:%S')} (open {int(open_dur)}s)"
+                )
+            ui_open_since = None
+
+        #last_ui_state = frontend_alive
+
+        # --- Backend status text formatting (for header) ---
+        if backend_misses >= DEBOUNCE_LIMIT:
+            state = "backend_down"
+            msg = f"❌⛔🚨 Backend DOWN at {time.strftime('%H:%M:%S')}"
+        else:
+            state = "backend_ok"
+            try:
+                # show actual backend ping time
+                bt = os.path.getmtime(BACKEND_PING)
+                msg = f"✅ Backend OK at {time.strftime('%H:%M:%S', time.localtime(bt))}"
+            except FileNotFoundError:
+                msg = f"✅ Backend OK at {time.strftime('%H:%M:%S')}"
+
+        # Status bar ALWAYS shows: "<MACHINE> — <msg>"
         update_status(f"{name} — {msg}")
-        
-        # Send Telegram ONLY when state changes
-        if current_state != laststate:
+
+        # Telegram ONLY when backend state changes (no UI-driven spam)
+        if state != last_backend_state:
             await send_telegram(msg)
-            laststate = current_state
+            last_backend_state = state
 
         # --- Internet check ---
         net_ok = await check_internet()

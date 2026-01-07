@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 from dotenv import load_dotenv
 import subprocess
-
+from contextlib import asynccontextmanager
 
 # --- load .env automatically ---
 load_dotenv()
@@ -19,9 +19,35 @@ CONFIG_FILE = "config.yaml"
 
 os.makedirs(RUNTIME_DIR, exist_ok=True)
 
-app = FastAPI(title="Signals Bot UI")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    stop_evt = asyncio.Event()
+    task = asyncio.create_task(_ui_server_heartbeat(stop_evt))
+    try:
+        yield
+    finally:
+        stop_evt.set()
+        try:
+            await task
+        except Exception:
+            pass
+
+app = FastAPI(title="Signals Bot UI", lifespan=lifespan)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+UI_SERVER_PING = os.path.join(RUNTIME_DIR, "ui_server.ping")
+
+async def _ui_server_heartbeat(stop_evt: asyncio.Event):
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
+    while not stop_evt.is_set():
+        try:
+            with open(UI_SERVER_PING, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+            os.utime(UI_SERVER_PING, None)
+        except Exception as e:
+            print(f"⚠️ Failed to update ui_server.ping: {e}")
+        await asyncio.sleep(5)
 
 # -------------------- helpers --------------------
 def load_config_dict() -> dict:
