@@ -57,7 +57,49 @@ function renderEvent(ev) {
   const d = new Date(ev.ts * 1000).toLocaleTimeString();
   const el = document.createElement("div");
   el.className = "event";
-  el.textContent = `[${d}] ${ev.msg || ev.type} `;
+
+  // Build readable message based on event type
+  let message = `[${d}] `;
+
+  switch (ev.type) {
+    case "new_message":
+      message += `📨 New message: ${(ev.preview || "").substring(0, 80)}`;
+      el.style.color = "#4dabf7";
+      break;
+    case "ignored":
+      const reason = ev.reason || "unknown";
+      const preview = (ev.preview || ev.msg || "").substring(0, 60);
+      message += `❌ Ignored (${reason})${preview ? ": " + preview : ""}`;
+      el.style.color = "#868e96";
+      break;
+    case "parse_success":
+    case "ai_parse_success":
+      message += `✅ Parsed: ${ev.currency} @ ${ev.entry}`;
+      el.style.color = "#51cf66";
+      break;
+    case "signal_parsed":
+      message += `✅ Signal parsed: ${ev.currency || ""} @ ${ev.entry || ""}`;
+      el.style.color = "#51cf66";
+      break;
+    case "trade_executed":
+      message += `💰 Trade: ${ev.msg || JSON.stringify(ev)}`;
+      el.style.color = "#ffd43b";
+      break;
+    case "error":
+      message += `🚨 Error: ${ev.msg || JSON.stringify(ev)}`;
+      el.style.color = "#ff6b6b";
+      break;
+    case "parse_debug":
+      // Skip debug events (too verbose), or uncomment to show them
+      return;
+      // message += `🔍 Debug [${ev.stage}]: ${ev.currency || ev.preview || ''}`;
+      // el.style.color = '#495057';
+      break;
+    default:
+      message += `${ev.type}: ${ev.msg || ev.preview || JSON.stringify(ev)}`;
+  }
+
+  el.textContent = message;
   evBox.prepend(el);
   while (evBox.childNodes.length > 500) evBox.removeChild(evBox.lastChild);
 }
