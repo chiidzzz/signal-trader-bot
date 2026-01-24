@@ -42,6 +42,48 @@ def _round_step(qty: float, step: float) -> float:
 def _fmt(v: float, digits: int = 8) -> str:
     return f"{v:.{digits}f}".rstrip("0").rstrip(".")
 
+def pct_to_bips(p: float) -> int:
+    # Binance trailingDelta uses BIPS: 1% = 100 bips
+    return int(round(p * 10000))
+
+
+def place_stop_loss_market_sell(symbol: str, quantity: float, stop_price: float):
+    sym = symbol.replace("/", "")
+    tick, step = _get_tick_and_step(sym)
+
+    qty = _round_step(float(quantity), step)
+    sp = _round_tick(float(stop_price), tick)
+
+    return client.create_order(
+        symbol=sym,
+        side="SELL",
+        type="STOP_LOSS",
+        quantity=_fmt(qty),
+        stopPrice=_fmt(sp),
+    )
+
+
+def place_trailing_take_profit_market_sell(symbol, quantity, activation_price, pullback_pct):
+    sym = symbol.replace("/", "")
+    _, step = _get_tick_and_step(sym)
+    qty = _fmt(_round_step(float(quantity), step))
+    trailing_delta = pct_to_bips(float(pullback_pct))
+
+    params = {
+        "symbol": sym,
+        "side": "SELL",
+        "type": "TAKE_PROFIT",
+        "quantity": qty,
+        "trailingDelta": trailing_delta,
+    }
+
+    # Only add stopPrice if specifically provided
+    if activation_price is not None:
+        tick, _ = _get_tick_and_step(sym)
+        params["stopPrice"] = _fmt(_round_tick(float(activation_price), tick))
+
+    return client.create_order(**params)
+
 def place_oco(symbol, side, quantity, tp, sl_trigger, sl_limit):
     """Fully filter-compliant OCO placement."""
     sym_clean = symbol.replace("/", "")

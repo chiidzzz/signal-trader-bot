@@ -113,7 +113,7 @@ async function loadConfig() {
     const cfg = await res.json();
 
     function set(name, val) {
-      const el = cfgForm.querySelector(`[name="${name}"]`);
+      const el = document.querySelector(`[name="${name}"]`);
       if (!el) return;
       if (el.type === "checkbox") {
         el.checked = !!val;
@@ -140,6 +140,10 @@ async function loadConfig() {
     set("override_sl_enabled", cfg.override_sl_enabled);
     set("override_sl_pct", cfg.override_sl_pct);
     set("override_sl_as_absolute", cfg.override_sl_as_absolute);
+    set("default_sl_pct", cfg.default_sl_pct);
+    set("exit_mode", cfg.exit_mode);
+    set("trailing_tp_activation_pct", cfg.trailing_tp_activation_pct);
+    set("trailing_tp_pullback_pct", cfg.trailing_tp_pullback_pct);
     set("flatten_check_interval_min", cfg.flatten_check_interval_min);
     set("heartbeat_max_idle_min", cfg.heartbeat_max_idle_min);
   } catch (err) {
@@ -207,19 +211,23 @@ cfgForm.onsubmit = async (e) => {
     "override_sl_enabled",
     "override_sl_pct",
     "override_sl_as_absolute",
+    "default_sl_pct",
     "flatten_check_interval_min",
     "heartbeat_max_idle_min",
+    "exit_mode",
+    "trailing_tp_activation_pct",
+    "trailing_tp_pullback_pct",
   ];
 
   for (const name of fields) {
-    const el = cfgForm.querySelector(`[name="${name}"]`);
+    const el = document.querySelector(`[name="${name}"]`);
     if (!el) continue;
     let val =
       el.type === "checkbox"
         ? el.checked
         : el.type === "number"
-        ? Number(el.value)
-        : el.value;
+          ? Number(el.value)
+          : el.value;
     data[name] = val;
   }
 

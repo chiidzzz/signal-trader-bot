@@ -8,7 +8,15 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 import ccxt
 import csv, datetime, traceback, aiofiles
-from live_trade_executor import place_bracket_atomic, place_oco, _fmt, _get_tick_and_step
+from live_trade_executor import (
+    place_bracket_atomic,
+    place_oco,
+    execute_market_buy,
+    place_stop_loss_market_sell,
+    place_trailing_take_profit_market_sell,
+    _fmt,
+    _get_tick_and_step,
+)
 from binance.client import Client
 import time
 import math
@@ -139,6 +147,12 @@ class Settings(BaseModel):
     override_sl_enabled: bool = False
     override_sl_pct: float = 0.01
     override_sl_as_absolute: bool = False
+    default_sl_pct: float = 0.1
+    # ===== Exit mode =====
+    exit_mode: str = "fixed_oco"  # fixed_oco | trailing_tp
+    # Trailing TP (percent as decimals)
+    trailing_tp_activation_pct: float = 0.01  # +1%
+    trailing_tp_pullback_pct: float = 0.005   # 0.5%
 
 
 def read_settings() -> Settings:
@@ -277,6 +291,29 @@ def round_amt(q, step):
         return q
     return float(Decimal(str(q)).quantize(Decimal(str(step)), rounding=ROUND_DOWN))
 
+def get_safe_sell_qty(bin_client: Client, symbol: str, filled_qty: float, buffer: float = 0.999) -> float:
+    """
+    Compute a sell quantity that is <= free balance and rounded DOWN to step size.
+    Prevents Binance -2010 insufficient balance due to fees/balance lag.
+    """
+    base_asset = symbol.split("/")[0].upper()
+
+    # Retry a few times to let balance settle
+    free_qty = 0.0
+    for _ in range(10):  # up to ~5s total
+        bal = bin_client.get_asset_balance(asset=base_asset) or {}
+        free_qty = float(bal.get("free", 0) or 0.0)
+        if free_qty > 0:
+            break
+        time.sleep(0.5)
+
+    safe_qty = min(float(filled_qty), float(free_qty)) * buffer
+
+    # Round DOWN to step
+    _, step = _get_tick_and_step(symbol.replace("/", ""))
+    safe_qty = math.floor(safe_qty / step) * step
+
+    return float(safe_qty)
 
 # --- Notifier ---
 class Notifier:
@@ -421,7 +458,7 @@ class Trader:
 
         await self.n.send(self.tg, f"✅ Pair resolved: *{symbol}*")
 
-        # === Duplicate signal protection (30s window) ===
+        # === Duplicate signal protection (180s window) ===
         if not hasattr(self, "_recent_signals"):
             self._recent_signals = []  # list of (symbol, entry, ts)
 
@@ -429,7 +466,7 @@ class Trader:
         self._recent_signals = [
             (sym, ent, ts)
             for (sym, ent, ts) in self._recent_signals
-            if now - ts < 60
+            if now - ts < 180
         ]
 
         # Normalize symbol name
@@ -475,6 +512,19 @@ class Trader:
         last = self.x.fetch_price(symbol)
         acceptable = abs(last - sig.entry) / sig.entry <= s.max_slippage_pct
 
+        # === Handle missing stop loss ===
+        if sig.stop is None:
+            # Use configurable default plus slippage
+            default_sl = getattr(s, 'default_sl_pct', 0.10)  # fallback to 10% if not in config
+            effective_sl_pct = default_sl + s.max_slippage_pct
+            sig.stop = float(sig.entry) * (1.0 - effective_sl_pct)
+            
+            await self.n.send(
+                self.tg,
+                f"⚠️ No SL in signal — using default {effective_sl_pct*100:.2f}%: ${sig.stop:.6f}"
+            )
+            emit("info", {"msg": f"Auto-calculated SL for {sig.currency_display}: ${sig.stop:.6f}"})
+
         # --- If slippage exceeded: either LIMIT entry (wait/cancel) or SKIP ---
         if (not acceptable) and (not s.use_limit_if_slippage_exceeds):
             await self.n.send(
@@ -503,6 +553,23 @@ class Trader:
         mode_label = "testnet" if (is_live and is_testnet) else "mainnet" if is_live else "sim"
         # 💥 DRY RUN = SIMULATION MODE (uses REAL BALANCE, but NO BUY)
         if s.dry_run:
+            # Calculate what the TP/SL would be
+            sim_tp = float(sig.tps.tp1)
+            sim_sl = float(sig.stop)
+            
+            # If override is enabled, show what WOULD be overridden
+            if s.override_tp_enabled:
+                sim_tp = last * (1.0 + float(s.override_tp_pct))
+            
+            if s.override_sl_enabled:
+                if s.override_sl_as_absolute:
+                    sim_sl = last - float(s.override_sl_pct)
+                else:
+                    sim_sl = last * (1.0 - float(s.override_sl_pct))
+            
+            profit_pct = ((sim_tp / last) - 1) * 100
+            loss_pct = ((last / sim_sl) - 1) * 100
+            
             await self.n.send(
                 self.tg,
                 f"🧪 *SIMULATION ONLY — No order placed*\n"
@@ -512,6 +579,10 @@ class Trader:
                 f"Spend: `{spend:.4f}` {quote_token}\n"
                 f"Price: `{last:.6f}`\n"
                 f"Amount: `{amount}` {symbol.split('/')[0]}\n"
+                f"─────────────────\n"
+                f"🎯 TP: `${sim_tp:.6f}` (+{profit_pct:.2f}%)\n"
+                f"🛑 SL: `${sim_sl:.6f}` (-{loss_pct:.2f}%)\n"
+                f"{'⚙️ Override enabled' if (s.override_tp_enabled or s.override_sl_enabled) else ''}"
             )
             emit("debug", {"msg": "STOP BEFORE BUY — SIMULATION MODE"})
             return
@@ -529,7 +600,6 @@ class Trader:
 
                     # If slippage exceeded AND limit-entry enabled -> do LIMIT entry, wait TIF, cancel if not filled
                     if (not acceptable) and s.use_limit_if_slippage_exceeds:
-                        import asyncio
                         import functools
                         from live_trade_executor import execute_limit_buy
 
@@ -603,13 +673,25 @@ class Trader:
                             }
                         else:
                             # normal full bracket (market + OCO)
-                            res = place_bracket_atomic(
-                                symbol=symbol,
-                                spend_usd=spend,
-                                entry_hint=float(sig.entry),
-                                tp_price=float(sig.tps.tp1),
-                                sl_trigger=float(sig.stop),
-                            )
+                            if getattr(s, "exit_mode", "fixed_oco") == "trailing_tp":
+                                # market buy only (no OCO)
+                                filled_qty, actual_fill_price = execute_market_buy(symbol, spend)
+                                res = {
+                                    "avg_price": float(actual_fill_price),
+                                    "filled_qty": float(filled_qty),
+                                    "tp": float(sig.tps.tp1),
+                                    "sl_trigger": float(sig.stop),
+                                    "oco_id": None,
+                                }
+                            else:
+                                # normal full bracket (market + OCO)
+                                res = place_bracket_atomic(
+                                    symbol=symbol,
+                                    spend_usd=spend,
+                                    entry_hint=float(sig.entry),
+                                    tp_price=float(sig.tps.tp1),
+                                    sl_trigger=float(sig.stop),
+                                )
                             
                     # Step 3: Get ACTUAL fill price and quantity
                     actual_fill_price = float(res['avg_price'])
@@ -645,6 +727,97 @@ class Trader:
                             "pct_or_abs": s.override_sl_pct
                         })
 
+                    # ===== FIXED SL + TRAILING TP MODE =====
+                    if getattr(s, "exit_mode", "fixed_oco") == "trailing_tp":
+                        # 1. Use existing class references for clients
+                        # We use self.x.exchange (ccxt) or a local binance-client for specific filters
+                        bin_client = Client(os.environ["BINANCE_API_KEY"], os.environ["BINANCE_API_SECRET"])
+                        
+                        safe_qty = get_safe_sell_qty(bin_client, symbol, float(filled_qty))
+                        if safe_qty <= 0:
+                            raise RuntimeError("Safe qty is 0; cannot place protection.")
+
+                        # 2. Place the FIXED STOP LOSS on Binance (Capital Protection)
+                        # This stays on the server even if your bot or internet dies.
+                        sl_order = await asyncio.to_thread(
+                            place_stop_loss_market_sell,
+                            symbol,
+                            float(safe_qty),
+                            float(final_sl),
+                        )
+                        sl_id = sl_order.get("orderId")
+
+                        # 3. Calculate Activation Price
+                        activation_price = float(actual_fill_price) * (1.0 + float(s.trailing_tp_activation_pct))
+
+                        await self.n.send(
+                            self.tg,
+                            (
+                                f"✅ BUY filled `{safe_qty:.8f}` {symbol} @ `${actual_fill_price:.6f}`\n"
+                                f"🛑 FIXED SL: `${float(final_sl):.6f}`\n"
+                                f"🎯 TRAILING ACT: `${activation_price:.6f}` "
+                                f"(Pullback: `{float(s.trailing_tp_pullback_pct)*100:.2f}%`)"
+                            ),
+                        )
+
+                        # 4. Corrected Background Watcher with enhanced logging
+                        async def activate_trailing_logic(sym, qty, act_px, current_sl_id):
+                            # Emit start of monitoring to UI
+                            emit("monitor_started", {"symbol": sym, "activation": act_px})
+                            
+                            while True:
+                                try:
+                                    # Fetch current price
+                                    ticker = await asyncio.to_thread(self.x.exchange.fetch_ticker, sym)
+                                    curr_px = float(ticker['last'])
+                                    
+                                    # (Optional) Log every check to UI for real-time monitoring
+                                    # emit("price_check", {"symbol": sym, "price": curr_px, "target": act_px})
+                                    
+                                    if curr_px >= act_px:
+                                        # Notify Telegram that activation price was hit
+                                        await self.n.send(self.tg, f"🎯 *Activation Hit for {sym}*\nPrice reached `${curr_px:.6f}`. Swapping Fixed SL for Trailing TP.")
+
+                                        # STEP A: Cancel the SL to unlock the coins
+                                        await asyncio.to_thread(self.x.exchange.cancel_order, current_sl_id, sym)
+                                        emit("sl_canceled", {"symbol": sym, "orderId": current_sl_id})
+                                        
+                                        # STEP B: Place Native Trailing TP
+                                        # Passing None for act_px as discussed to ensure immediate server-side trailing
+                                        trailing_order = await asyncio.to_thread(
+                                            place_trailing_take_profit_market_sell,
+                                            sym,
+                                            qty,
+                                            None, 
+                                            float(s.trailing_tp_pullback_pct)
+                                        )
+                                        
+                                        # Extract and notify details of the new trailing order
+                                        tp_id = trailing_order.get("orderId", "Unknown")
+                                        await self.n.send(
+                                            self.tg, 
+                                            f"🚀 *Trailing TP Active*\n"
+                                            f"Symbol: `{sym}`\n"
+                                            f"OrderID: `{tp_id}`\n"
+                                            f"Trail Start: `${curr_px:.6f}`\n"
+                                            f"Pullback: `{float(s.trailing_tp_pullback_pct)*100:.2f}%`"
+                                        )
+                                        
+                                        emit("trailing_activated", {
+                                            "symbol": sym, 
+                                            "orderId": tp_id, 
+                                            "startPrice": curr_px
+                                        })
+                                        break 
+                                except Exception as e:
+                                    error_msg = f"Watcher Error ({sym}): {e}"
+                                    print(error_msg)
+                                    emit("watcher_error", {"msg": error_msg})
+                                await asyncio.sleep(2) 
+
+                        asyncio.create_task(activate_trailing_logic(symbol, safe_qty, activation_price, sl_id))
+                        return
+                    
                     # Step 5: If override needed, cancel old OCO and place new one
                     if needs_override:
                         base_asset = symbol.split("/")[0].upper()
@@ -1197,6 +1370,18 @@ async def main():
                     try:
                         order = binance.exchange.fetch_order(order_id, info['symbol'])
                         if order['status'] == 'closed' and order['filled'] > 0:
+                            # Cancel any remaining STOP_LOSS / TAKE_PROFIT orders for this symbol
+                            try:
+                                still_open = binance.exchange.fetch_open_orders(info['symbol'])
+                                for oo in still_open:
+                                    ot = (oo.get("type") or "").upper()
+                                    if ("STOP_LOSS" in ot) or ("TAKE_PROFIT" in ot):
+                                        try:
+                                            binance.exchange.cancel_order(oo["id"], info["symbol"])
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
                             # Order was filled!
                             emoji = "🎯" if info['type'] == "TP" else "🛑"
                             msg = (
