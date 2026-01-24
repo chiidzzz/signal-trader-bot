@@ -133,6 +133,9 @@ async function loadConfig() {
     set("respect_spot_only", cfg.respect_spot_only);
     set("min_notional_usdt", cfg.min_notional_usdt);
     set("limit_time_in_force_sec", cfg.limit_time_in_force_sec);
+    set("market_cap_filter_enabled", cfg.market_cap_filter_enabled);
+    set("market_cap_min", cfg.market_cap_min);
+    set("market_cap_max", cfg.market_cap_max);
     set("prefer_symbol_in_parentheses", cfg.prefer_symbol_in_parentheses);
     set("fallback_to_name_search", cfg.fallback_to_name_search);
     set("override_tp_enabled", cfg.override_tp_enabled);
@@ -204,6 +207,9 @@ cfgForm.onsubmit = async (e) => {
     "respect_spot_only",
     "min_notional_usdt",
     "limit_time_in_force_sec",
+    "market_cap_filter_enabled",
+    "market_cap_min",
+    "market_cap_max",
     "prefer_symbol_in_parentheses",
     "fallback_to_name_search",
     "override_tp_enabled",

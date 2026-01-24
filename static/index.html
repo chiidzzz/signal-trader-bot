@@ -126,6 +126,22 @@
                 </fieldset>
 
                 <fieldset>
+                    <legend>Market Cap Filter</legend>
+                    <div class="row">
+                        <label>Enable Market Cap Filter</label>
+                        <input type="checkbox" name="market_cap_filter_enabled">
+                    </div>
+                    <div class="row">
+                        <label>Min Market Cap (USD, 0=no limit)</label>
+                        <input type="number" step="1000000" min="0" name="market_cap_min" placeholder="10000000">
+                    </div>
+                    <div class="row">
+                        <label>Max Market Cap (USD, 0=no limit)</label>
+                        <input type="number" step="1000000" min="0" name="market_cap_max" placeholder="1000000000">
+                    </div>
+                </fieldset>
+
+                <fieldset>
                     <legend>TP / SL Overrides</legend>
 
                     <div class="row">

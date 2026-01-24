@@ -22,6 +22,7 @@ import time
 import math
 from parsers.signal_parser import parse_signal, ParsedSignal, TPSet
 from parsers.ai_signal_parser import AISignalParser
+from market_cap_checker import MarketCapChecker
 
 last_signal_ts = time.time()
 
@@ -153,7 +154,10 @@ class Settings(BaseModel):
     # Trailing TP (percent as decimals)
     trailing_tp_activation_pct: float = 0.01  # +1%
     trailing_tp_pullback_pct: float = 0.005   # 0.5%
-
+    # Market cap filter
+    market_cap_filter_enabled: bool = False
+    market_cap_min: float = 0
+    market_cap_max: float = 0
 
 def read_settings() -> Settings:
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -395,6 +399,7 @@ class Trader:
         self.x = binance
         self.tg = tg_client
         self.n = notifier
+        self.market_cap_checker = MarketCapChecker()
 
     async def on_signal(self, sig: "ParsedSignal"):
         maybe_reload_settings()
@@ -458,6 +463,38 @@ class Trader:
 
         await self.n.send(self.tg, f"✅ Pair resolved: *{symbol}*")
 
+        # === Market Cap Filter ===
+        if s.market_cap_filter_enabled:
+            min_cap = s.market_cap_min
+            max_cap = s.market_cap_max
+            
+            base_symbol = symbol.split("/")[0]
+            passes, market_cap = self.market_cap_checker.check_filter(base_symbol, min_cap, max_cap)
+            
+            if not passes:
+                reason = ""
+                if market_cap is None:
+                    reason = "Could not verify market cap"
+                elif min_cap > 0 and market_cap < min_cap:
+                    reason = f"Market cap ${market_cap:,.0f} < min ${min_cap:,.0f}"
+                elif max_cap > 0 and market_cap > max_cap:
+                    reason = f"Market cap ${market_cap:,.0f} > max ${max_cap:,.0f}"
+                
+                await self.n.send(
+                    self.tg,
+                    f"⏭️ *Trade Skipped: Market Cap Filter*\n"
+                    f"Symbol: `{symbol}`\n"
+                    f"Reason: {reason}"
+                )
+                emit("skip_market_cap", {"symbol": symbol, "market_cap": market_cap, "reason": reason})
+                return
+            
+            # Passed filter - notify
+            await self.n.send(
+                self.tg,
+                f"✅ Market cap: ${market_cap:,.0f}"
+            )
+            
         # === Duplicate signal protection (180s window) ===
         if not hasattr(self, "_recent_signals"):
             self._recent_signals = []  # list of (symbol, entry, ts)
