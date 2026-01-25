@@ -5,10 +5,11 @@ import httpx
 import json
 import yaml
 from dotenv import load_dotenv
-from binance.client import Client
 from binance.exceptions import BinanceAPIException
+# 1. IMPORT FACTORY (Ensures time sync)
+from services import get_synced_client 
 
-# --- Load environment variables (.env must contain TG_BOT_TOKEN + TG_NOTIFY_CHAT_ID) ---
+# --- Load environment variables ---
 load_dotenv()
 
 # --- Constants ---
@@ -16,24 +17,24 @@ RUNTIME_DIR = "runtime"
 BACKEND_PING = os.path.join(RUNTIME_DIR, "backend.ping")
 FRONTEND_PING = os.path.join(RUNTIME_DIR, "frontend.ping")
 UI_SERVER_PING = os.path.join(RUNTIME_DIR, "ui_server.ping")
-UI_SERVER_ACTIVE_WINDOW_SEC = 20  # ui_server.ping fresh within 20s => ui_server alive
+UI_SERVER_ACTIVE_WINDOW_SEC = 20  
 STATUS_FILE = os.path.join(RUNTIME_DIR, "status.json")
 CHECK_INTERVAL = 10
 STALE_THRESHOLD_BACKEND = 45
 STALE_THRESHOLD_FRONTEND = 90
 DEBOUNCE_LIMIT = 5
-# UI open/close detection (to avoid refresh spam)
-UI_ACTIVE_WINDOW_SEC = 60   # UI considered open if frontend.ping updated within last 90s
-UI_MIN_OPEN_SEC = 30        # only send "UI closed" if UI was open >= 30s
-UI_CLOSE_DEBOUNCE = 3          # require 3 consecutive "misses" before declaring closed
-UI_OPEN_DEBOUNCE  = 1          # require 1 consecutive "hits" before declaring opened
+# UI open/close detection
+UI_ACTIVE_WINDOW_SEC = 60
+UI_MIN_OPEN_SEC = 30
+UI_CLOSE_DEBOUNCE = 3
+UI_OPEN_DEBOUNCE  = 1
 # --- Binance check ---
 BINANCE_CHECK_INTERVAL = 15 * 60  # every 15 minutes
 # --- Telegram ---
 TOKEN = os.getenv("TG_BOT_TOKEN")
 CHAT_ID = os.getenv("TG_NOTIFY_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
 
-# --- Helper: load machine name from config.yaml ---
+# --- Helper: load machine name ---
 def get_machine_name():
     try:
         with open("config.yaml", "r", encoding="utf-8") as f:
@@ -42,7 +43,7 @@ def get_machine_name():
     except:
         return "Machine"
 
-# --- Helper: update status WITHOUT emitting to event log ---
+# --- Helper: update status ---
 def update_status(msg: str):
     os.makedirs(RUNTIME_DIR, exist_ok=True)
     status = {
@@ -101,19 +102,14 @@ async def check_binance_auth():
       (True, "OK") if Binance signed endpoint is reachable (auth/IP OK)
       (False, reason_str) otherwise
     """
-    key = os.getenv("BINANCE_API_KEY")
-    secret = os.getenv("BINANCE_API_SECRET")
-
-    if not key or not secret:
-        return False, "Missing BINANCE_API_KEY/BINANCE_API_SECRET in .env"
-
     try:
-        c = Client(key, secret)
-        # Signed endpoint -> will fail on IP restriction (-2015)
-        c.get_account()
+        # 2. USE FACTORY (Automatically handles API keys & Time Sync)
+        c = get_synced_client()
+        
+        # 3. CALL WITH recvWindow (Prevents -1021 errors)
+        c.get_account(recvWindow=60000)
         return True, "OK"
     except BinanceAPIException as e:
-        # The exact issue you reported: -2015 Invalid API-key, IP, or permissions
         if getattr(e, "code", None) == -2015:
             return False, f"Binance blocked (IP/API permission): {e.message}"
         return False, f"Binance API exception ({getattr(e,'code',None)}): {str(e)}"
@@ -129,7 +125,7 @@ async def monitor():
     last_net_state = None
     last_backend_state = None
     last_ui_state = False
-    last_ui_server_state = None  # "up" or "down"
+    last_ui_server_state = None 
     ui_open_since = None
     last_binance_state = None
     last_binance_check = 0
@@ -138,7 +134,7 @@ async def monitor():
     ui_hits = 0
 
     while True:
-        name = get_machine_name()  # reload live if user changes it
+        name = get_machine_name()
         now = time.time()
         backend_alive = False
 
@@ -151,7 +147,6 @@ async def monitor():
         except FileNotFoundError:
             print(f"[WATCHDOG] {name} Backend ping file not found")
         
-        # Debouncing - no change needed, just track state
         backend_misses = backend_misses + 1 if not backend_alive else 0
         
         # --- Determine state and alert ONLY on changes ---
@@ -162,7 +157,7 @@ async def monitor():
             state = "backend_ok"
             msg = f"✅ Backend OK at {time.strftime('%H:%M:%S')}"
         
-        # --- UI SERVER up/down (separate from browser session) ---
+        # --- UI SERVER up/down ---
         try:
             age_us = now - os.path.getmtime(UI_SERVER_PING)
             ui_server_alive = age_us <= UI_SERVER_ACTIVE_WINDOW_SEC
@@ -177,8 +172,7 @@ async def monitor():
                 await send_telegram(f"🔴 UI server DOWN at {time.strftime('%H:%M:%S')}")
             last_ui_server_state = ui_server_state
 
-        # --- UI open/close (Telegram) with debounce ---
-                # If ui_server is down, don't emit UI opened/closed (not a browser event)
+        # --- UI open/close ---
         if not ui_server_alive:
             ui_hits = 0
             ui_misses = 0
@@ -187,7 +181,6 @@ async def monitor():
         try:
             age_f = now - os.path.getmtime(FRONTEND_PING)
             frontend_alive_now = age_f <= UI_ACTIVE_WINDOW_SEC
-            print(f"[WATCHDOG] UI age_f={age_f:.1f}s alive_now={frontend_alive_now} hits={ui_hits} misses={ui_misses}")
         except FileNotFoundError:
             frontend_alive_now = False
 
@@ -198,13 +191,11 @@ async def monitor():
             ui_misses += 1
             ui_hits = 0
 
-        # OPEN transition (debounced)
         if (not last_ui_state) and ui_hits >= UI_OPEN_DEBOUNCE:
             last_ui_state = True
             ui_open_since = now
             await send_telegram(f"🟢 UI opened at {time.strftime('%H:%M:%S')}")
 
-        # CLOSE transition (debounced)
         if last_ui_state and ui_misses >= UI_CLOSE_DEBOUNCE:
             last_ui_state = False
             open_dur = (now - ui_open_since) if ui_open_since else 0
@@ -214,25 +205,20 @@ async def monitor():
                 )
             ui_open_since = None
 
-        #last_ui_state = frontend_alive
-
-        # --- Backend status text formatting (for header) ---
+        # --- Backend status text formatting ---
         if backend_misses >= DEBOUNCE_LIMIT:
             state = "backend_down"
             msg = f"❌⛔🚨 Backend DOWN at {time.strftime('%H:%M:%S')}"
         else:
             state = "backend_ok"
             try:
-                # show actual backend ping time
                 bt = os.path.getmtime(BACKEND_PING)
                 msg = f"✅ Backend OK at {time.strftime('%H:%M:%S', time.localtime(bt))}"
             except FileNotFoundError:
                 msg = f"✅ Backend OK at {time.strftime('%H:%M:%S')}"
 
-        # Status bar ALWAYS shows: "<MACHINE> — <msg>"
         update_status(f"{name} — {msg}")
 
-        # Telegram ONLY when backend state changes (no UI-driven spam)
         if state != last_backend_state:
             await send_telegram(msg)
             last_backend_state = state
@@ -246,19 +232,17 @@ async def monitor():
 
         last_net_state = net_ok
 
-        # --- NEW: Binance auth/IP check (every 15 minutes) ---
+        # --- NEW: Binance auth/IP check ---
         if time.time() - last_binance_check >= BINANCE_CHECK_INTERVAL:
             last_binance_check = time.time()
             bin_ok, bin_reason = await check_binance_auth()
 
             if bin_ok:
-                # Send ONLY once when it comes back (no OK spam)
                 if last_binance_state is not True:
                     await send_telegram("✅ Binance API access restored (IP authorized)")
                 update_status(f"{name}: ✅ Binance API OK")
                 last_binance_state = True
             else:
-                # Send EVERY 15 minutes while blocked (your preference)
                 await send_telegram(
                     "🚨 Binance API BLOCKED!\n"
                     "IP changed or not whitelisted.\n"

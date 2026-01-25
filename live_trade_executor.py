@@ -1,10 +1,14 @@
 import os, time, math, hmac, hashlib, requests, urllib.parse
+from decimal import Decimal, ROUND_DOWN
 from dotenv import load_dotenv
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
+from services import get_synced_client
 
 # === Setup ================================================================
-load_dotenv()
+# USE THE FACTORY - NO MORE MANUAL SETUP
+client = get_synced_client()
+BASE_URL = "https://api.binance.com"
 api_key = os.getenv("BINANCE_API_KEY")
 api_secret = os.getenv("BINANCE_API_SECRET")
 if not api_key or not api_secret:
@@ -54,12 +58,14 @@ def place_stop_loss_market_sell(symbol: str, quantity: float, stop_price: float)
     qty = _round_step(float(quantity), step)
     sp = _round_tick(float(stop_price), tick)
 
+    # 🔧 FIX 2: Added recvWindow=60000
     return client.create_order(
         symbol=sym,
         side="SELL",
         type="STOP_LOSS",
         quantity=_fmt(qty),
         stopPrice=_fmt(sp),
+        recvWindow=60000
     )
 
 
@@ -75,6 +81,7 @@ def place_trailing_take_profit_market_sell(symbol, quantity, activation_price, p
         "type": "TAKE_PROFIT",
         "quantity": qty,
         "trailingDelta": trailing_delta,
+        "recvWindow": 60000, # 🔧 FIX 2
     }
 
     # Only add stopPrice if specifically provided
@@ -128,7 +135,10 @@ def place_oco(symbol, side, quantity, tp, sl_trigger, sl_limit):
 
     # --- Compose signed request ---
     url = BASE_URL + "/api/v3/order/oco"
-    ts = int(time.time() * 1000)
+    
+    # Apply offset manually for raw requests
+    ts = int((time.time() * 1000) + client.timestamp_offset)
+    
     params = {
         "symbol": sym_clean,
         "side": side,
@@ -138,6 +148,7 @@ def place_oco(symbol, side, quantity, tp, sl_trigger, sl_limit):
         "stopLimitPrice": sl_lim_str,
         "stopLimitTimeInForce": "GTC",
         "timestamp": str(ts),
+        "recvWindow": "60000" # 🔧 FIX 2: Maximize window
     }
     query = urllib.parse.urlencode(params, doseq=True)
     signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
@@ -159,11 +170,7 @@ def place_oco(symbol, side, quantity, tp, sl_trigger, sl_limit):
 
 # === Market buy ==========================================================
 def execute_market_buy(symbol, usd_amount):
-    """Market buy with automatic qty calc and return of actual fill price.
-    
-    Returns:
-        tuple: (filled_qty, actual_fill_price)
-    """
+    """Market buy with automatic qty calc and return of actual fill price."""
     sym_clean = symbol.replace("/", "")
     
     # Get current price and symbol info for proper rounding
@@ -179,11 +186,13 @@ def execute_market_buy(symbol, usd_amount):
 
     print(f"[BUY DEBUG] Attempting to buy {qty_str} {sym_clean} (${usd_amount:.2f} @ ${price:.6f})")
 
-    order = client.order_market_buy(symbol=sym_clean, quantity=qty_str)
+    # 🔧 FIX 2: Added recvWindow=60000
+    order = client.order_market_buy(symbol=sym_clean, quantity=qty_str, recvWindow=60000)
 
     # --- Wait for fill ---
     for i in range(20):
-        o = client.get_order(symbol=sym_clean, orderId=order["orderId"])
+        # 🔧 FIX 2: Added recvWindow=60000
+        o = client.get_order(symbol=sym_clean, orderId=order["orderId"], recvWindow=60000)
         if o["status"] == "FILLED":
             filled_qty = float(o["executedQty"])
             
@@ -202,9 +211,6 @@ def execute_limit_buy(symbol, usd_amount, limit_price, tif_sec, on_placed=None):
     """
     Place LIMIT BUY at limit_price, wait up to tif_sec for fill.
     If not filled -> cancel and return (None, None, orderId)
-
-    Returns:
-        tuple: (filled_qty or None, avg_fill_price or None, order_id)
     """
     sym_clean = symbol.replace("/", "")
 
@@ -220,11 +226,13 @@ def execute_limit_buy(symbol, usd_amount, limit_price, tif_sec, on_placed=None):
 
     print(f"[LIMIT BUY] Placing LIMIT BUY {sym_clean} qty={qty_str} @ {px_str} (tif={tif_sec}s)")
 
+    # 🔧 FIX 2: Added recvWindow=60000
     order = client.order_limit_buy(
         symbol=sym_clean,
         quantity=qty_str,
         price=px_str,
         timeInForce="GTC",
+        recvWindow=60000
     )
 
     oid = order["orderId"]
@@ -240,7 +248,8 @@ def execute_limit_buy(symbol, usd_amount, limit_price, tif_sec, on_placed=None):
 
     # poll until filled or timeout
     while time.time() < deadline:
-        o = client.get_order(symbol=sym_clean, orderId=oid)
+        # 🔧 FIX 2: Added recvWindow=60000
+        o = client.get_order(symbol=sym_clean, orderId=oid, recvWindow=60000)
         st = o.get("status")
         if st == "FILLED":
             filled_qty = float(o["executedQty"])
@@ -256,7 +265,8 @@ def execute_limit_buy(symbol, usd_amount, limit_price, tif_sec, on_placed=None):
 
     # not filled in time -> cancel
     try:
-        client.cancel_order(symbol=sym_clean, orderId=oid)
+        # 🔧 FIX 2: Added recvWindow=60000
+        client.cancel_order(symbol=sym_clean, orderId=oid, recvWindow=60000)
         print(f"[LIMIT BUY] CANCELED (timeout) orderId={oid}")
     except Exception as e:
         print(f"[LIMIT BUY] cancel failed: {e}")
@@ -307,7 +317,8 @@ def place_oco_after_fill(
     locked_balance = 0.0
 
     while waited < max_wait_s:
-        bal = client.get_asset_balance(asset=base_asset) or {}
+        # 🔧 FIX 2: Added recvWindow=60000
+        bal = client.get_asset_balance(asset=base_asset, recvWindow=60000) or {}
         free_balance = float(bal.get("free", 0) or 0.0)
         locked_balance = float(bal.get("locked", 0) or 0.0)
         total = free_balance + locked_balance
@@ -345,7 +356,8 @@ def place_oco_after_fill(
 def market_sell(symbol, qty):
     sym = symbol.replace("/", "")
     qty_str = _fmt(qty)
-    order = client.order_market_sell(symbol=sym, quantity=qty_str)
+    # 🔧 FIX 2: Added recvWindow=60000
+    order = client.order_market_sell(symbol=sym, quantity=qty_str, recvWindow=60000)
     return order
 
 # === Verify OCO ==========================================================
@@ -353,7 +365,8 @@ def verify_oco(oco_id, timeout_sec=5):
     t0 = time.time()
     while time.time() - t0 < timeout_sec:
         try:
-            data = client.get_oco_order(orderListId=oco_id)
+            # 🔧 FIX 2: Added recvWindow=60000
+            data = client.get_oco_order(orderListId=oco_id, recvWindow=60000)
             if "orders" in data and len(data["orders"]) >= 2:
                 return True
         except Exception:
@@ -442,7 +455,8 @@ def place_bracket_atomic(
 
         while waited < max_wait_s:
             try:
-                bal = client.get_asset_balance(asset=base_asset) or {}
+                # 🔧 FIX 2: Added recvWindow=60000
+                bal = client.get_asset_balance(asset=base_asset, recvWindow=60000) or {}
                 free_balance = float(bal.get("free", 0) or 0.0)
                 locked_balance = float(bal.get("locked", 0) or 0.0)
                 total_balance = free_balance + locked_balance
@@ -515,7 +529,8 @@ def place_bracket_atomic(
                 if "insufficient balance" in msg and attempt < 2:
                     time.sleep(2.0)
                     try:
-                        bal = client.get_asset_balance(asset=base_asset) or {}
+                        # 🔧 FIX 2: Added recvWindow=60000
+                        bal = client.get_asset_balance(asset=base_asset, recvWindow=60000) or {}
                         free_balance = float(bal.get("free", 0) or 0.0)
                         safe_qty = _round_step(min(free_balance, filled_qty) * 0.999, step)
                         if safe_qty >= step:
@@ -540,7 +555,8 @@ def place_bracket_atomic(
 
         # Register OCO
         try:
-            from signal_trader import track_oco
+            # 🔧 FIX 3: Fixed import path for refactored structure
+            from trading_shared import track_oco
             track_oco(symbol, oco_id, avg_price)
             print(f"[OCO TRACK] Tracking {symbol} OCO {oco_id}")
         except Exception as e:
@@ -554,7 +570,8 @@ def place_bracket_atomic(
         if any(x in error_msg for x in ["insufficient balance", "Filter failure", "NOTIONAL", "oco", "orderListId"]):
             print(f"[OCO WARN] Non-fatal post-OCO message: {error_msg}")
             try:
-                from signal_trader import track_oco
+                # 🔧 FIX 3: Fixed import path for refactored structure
+                from trading_shared import track_oco
                 track_oco(symbol, oco_id, avg_price)
                 print(f"[OCO TRACK] Tracking {symbol} OCO {oco_id} after non-fatal warning")
             except Exception as te:

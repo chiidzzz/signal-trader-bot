@@ -1,41 +1,14 @@
 import re
-from typing import Optional
-from dataclasses import dataclass
-from pydantic import BaseModel
-from utils.events import emit
-
-# For smart fallback
-import json
+import sys
 import os
+import json
+from typing import Optional
 
-# Load aliases for fallback (LITECOIN -> LTC, Horizen -> ZEN, etc.)
-ALIASES_PATH = os.path.join(os.path.dirname(__file__), "..", "token_aliases.json")
-try:
-    with open(ALIASES_PATH, "r", encoding="utf-8") as f:
-        TOKEN_ALIASES = {k.upper(): v.upper() for k, v in json.load(f).items()}
-except:
-    TOKEN_ALIASES = {}
+# --- FIX: Add parent directory to path so we can import trading_shared ---
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
-# ---------- Models ----------
-class TPSet(BaseModel):
-    tp1: float
-    tp2: Optional[float] = None
-    tp3: Optional[float] = None
-
-
-@dataclass
-class ParsedSignal:
-    raw_text: str
-    currency_display: str
-    symbol_hint: Optional[str]
-    entry: float
-    stop: Optional[float]
-    tps: TPSet
-    capital_pct: Optional[float]
-    period_hours: Optional[int]
-    spot_only: bool = True
-
+# Now we can import from the root file 'trading_shared'
+from trading_shared import emit, ParsedSignal, TPSet, TOKEN_ALIASES
 
 # ---------- Helpers ----------
 def _m(text, pats):

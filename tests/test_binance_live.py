@@ -1,6 +1,8 @@
-from binance.client import Client
 from dotenv import load_dotenv
+import sys
 import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from services import get_synced_client
 
 # === Load keys from .env file ===
 load_dotenv()
@@ -12,7 +14,7 @@ if not api_key or not api_secret:
     raise ValueError("❌ API keys not found. Make sure your .env file has BINANCE_API_KEY and BINANCE_API_SECRET.")
 
 # === Initialize client ===
-client = Client(api_key, api_secret)
+client = get_synced_client()
 
 # === Test connection ===
 try:

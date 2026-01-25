@@ -2,7 +2,7 @@ import os
 import json
 from typing import Optional
 from groq import Groq
-from parsers.signal_parser import ParsedSignal, TPSet
+from trading_shared import ParsedSignal, TPSet
 
 class AISignalParser:
     def __init__(self):
