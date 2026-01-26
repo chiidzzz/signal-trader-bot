@@ -47,8 +47,6 @@ async def heartbeat_watchdog(notifier: sv.Notifier, client):
         if idle > (heartbeat_max * 60):
             await notifier.send(client, f"⚠️ No signals for {int(idle/60)} minutes!")
             await ts.log_error("Heartbeat timeout")
-            # reset to avoid spamming
-            last_signal_ts = time.time()
 
 async def flatten_watchdog(binance: sv.BinanceSpot, notifier: sv.Notifier, client):
     cfg_dict = ts.read_settings_dict()
